@@ -35,6 +35,8 @@ export class Config {
     this.scryptLogN = v.scryptLogN;
     this.loginMaxFailures = v.loginMaxFailures;
     this.loginLockoutMin = v.loginLockoutMin;
+    this.loginRequiresVerifiedEmail = v.loginRequiresVerifiedEmail;
+    this.resendCooldownSec = v.resendCooldownSec;
     this.notifyUrl = v.notifyUrl;
     this.notifyApiKey = v.notifyApiKey;
     this.notifyTimeoutMs = v.notifyTimeoutMs;
@@ -90,6 +92,8 @@ export class Config {
       scryptLogN: r.integer('SCRYPT_LOG_N', 15, { min: 14, max: 20 }),
       loginMaxFailures: r.integer('LOGIN_MAX_FAILURES', 10, { min: 3, max: 100 }),
       loginLockoutMin: r.integer('LOGIN_LOCKOUT_MIN', 15, { min: 1 }),
+      loginRequiresVerifiedEmail: r.boolean('LOGIN_REQUIRES_VERIFIED_EMAIL', false),
+      resendCooldownSec: r.integer('RESEND_COOLDOWN_SEC', 60, { min: 0, max: 3_600 }),
       notifyUrl,
       notifyApiKey,
       notifyTimeoutMs: r.integer('NOTIFY_TIMEOUT_MS', 5_000, { min: 500, max: 60_000 }),

@@ -1,0 +1,444 @@
+import { UserStore } from '../store/user-store.js';
+import { AuthError } from './errors.js';
+
+/** @typedef {import('../types.js').UserRow} UserRow */
+/** @typedef {import('../types.js').SessionRow} SessionRow */
+/** @typedef {import('../types.js').Logger} Logger */
+/** @typedef {import('../crypto/jwt.js').JwtSigner} JwtSigner */
+/** @typedef {import('../crypto/password.js').PasswordHasher} PasswordHasher */
+/** @typedef {import('../store/session-store.js').SessionStore} SessionStore */
+/** @typedef {import('../store/action-token-store.js').ActionTokenStore} ActionTokenStore */
+/** @typedef {import('../store/event-store.js').EventStore} EventStore */
+/** @typedef {import('./mailer.js').Mailer} Mailer */
+/** @typedef {import('./password-policy.js').PasswordPolicy} PasswordPolicy */
+
+/**
+ * Request context recorded in the audit log and on sessions.
+ * @typedef {object} Ctx
+ * @property {string|null} ip
+ * @property {string|null} userAgent
+ */
+
+/**
+ * @typedef {object} TokenPair
+ * @property {string} accessToken
+ * @property {number} accessTokenExpiresAt   Epoch ms.
+ * @property {string} refreshToken
+ * @property {number} refreshTokenExpiresAt  Epoch ms.
+ * @property {string} sessionId
+ */
+
+/**
+ * @typedef {object} AuthServiceOptions
+ * @property {number} refreshTtlMs
+ * @property {number} verifyTtlMs
+ * @property {number} resetTtlMs
+ * @property {number} loginMaxFailures
+ * @property {number} lockoutMs
+ * @property {boolean} loginRequiresVerifiedEmail
+ * @property {number} resendCooldownMs
+ * @property {string} verifyUrlTemplate
+ * @property {string} resetUrlTemplate
+ */
+
+/**
+ * All authentication use-cases. Stores are synchronous SQLite wrappers; hashing, signing
+ * and mail are async. Every state change is written to the audit log.
+ */
+export class AuthService {
+  /**
+   * @param {object} deps
+   * @param {import('../db.js').Database} deps.db
+   * @param {UserStore} deps.users
+   * @param {SessionStore} deps.sessions
+   * @param {ActionTokenStore} deps.tokens
+   * @param {EventStore} deps.events
+   * @param {PasswordHasher} deps.hasher
+   * @param {PasswordPolicy} deps.policy
+   * @param {JwtSigner} deps.jwt
+   * @param {Mailer} deps.mailer
+   * @param {Logger} deps.log
+   * @param {AuthServiceOptions} deps.options
+   * @param {() => number} [deps.now]
+   */
+  constructor({ db, users, sessions, tokens, events, hasher, policy, jwt, mailer, log, options, now = Date.now }) {
+    this.db = db;
+    this.users = users;
+    this.sessions = sessions;
+    this.tokens = tokens;
+    this.events = events;
+    this.hasher = hasher;
+    this.policy = policy;
+    this.jwt = jwt;
+    this.mailer = mailer;
+    this.log = log;
+    this.options = options;
+    this.now = now;
+  }
+
+  // ---------------------------------------------------------------- registration & verification
+
+  /**
+   * Create a user and send the verification email. Registration succeeds even if the mail
+   * cannot be sent; `verificationEmailSent` tells the caller to offer a resend.
+   * @param {{ email: string, password: string, name?: string|null }} input
+   * @param {Ctx} ctx
+   * @returns {Promise<{ user: UserRow, verificationEmailSent: boolean }>}
+   */
+  async register(input, ctx) {
+    const email = UserStore.normalizeEmail(input.email);
+    this.#assertPasswordAcceptable(input.password, email);
+    if (this.users.byEmail(email)) throw new AuthError('EMAIL_TAKEN', 'an account with this email already exists');
+    const passwordHash = await this.hasher.hash(input.password);
+    if (this.users.byEmail(email)) throw new AuthError('EMAIL_TAKEN', 'an account with this email already exists'); // raced during hashing
+    const user = this.users.create({ email, name: input.name ?? null, passwordHash }, this.now());
+    this.events.record({ userId: user.id, type: 'user.registered', ip: ctx.ip }, this.now());
+    const verificationEmailSent = await this.#sendVerification(user);
+    return { user, verificationEmailSent };
+  }
+
+  /**
+   * @param {string} token
+   * @param {Ctx} ctx
+   * @returns {UserRow}
+   */
+  verifyEmail(token, ctx) {
+    const row = this.tokens.consume(token, 'verify_email', this.now());
+    if (!row) throw new AuthError('INVALID_TOKEN', 'verification link is invalid or expired');
+    this.users.markVerified(row.user_id, this.now());
+    this.events.record({ userId: row.user_id, type: 'email.verified', ip: ctx.ip }, this.now());
+    return this.#requireUser(row.user_id);
+  }
+
+  /**
+   * Re-send the verification mail. Silent when the email is unknown (no enumeration) and
+   * throttled per user.
+   * @param {string} email
+   * @param {Ctx} ctx
+   * @returns {Promise<void>}
+   */
+  async resendVerification(email, ctx) {
+    const user = this.users.byEmail(email);
+    if (!user) return;
+    if (user.email_verified_at) throw new AuthError('ALREADY_VERIFIED', 'email is already verified');
+    this.#assertResendAllowed(user.id, 'verify_email');
+    this.events.record({ userId: user.id, type: 'email.verification_resent', ip: ctx.ip }, this.now());
+    await this.#sendVerification(user);
+  }
+
+  // ---------------------------------------------------------------- login & sessions
+
+  /**
+   * @param {{ email: string, password: string }} input
+   * @param {Ctx} ctx
+   * @returns {Promise<{ user: UserRow, tokens: TokenPair }>}
+   */
+  async login(input, ctx) {
+    const now = this.now();
+    const user = this.users.byEmail(input.email);
+    // Hash even when the user is missing so response time does not reveal existence.
+    const ok = user ? await this.hasher.verify(input.password, user.password_hash) : await this.#burnHash(input.password);
+    if (!user) {
+      this.events.record({ type: 'login.failed', ip: ctx.ip, meta: { reason: 'unknown_email' } }, now);
+      throw new AuthError('INVALID_CREDENTIALS', 'email or password is incorrect');
+    }
+    if (user.locked_until !== null && user.locked_until > now) {
+      this.events.record({ userId: user.id, type: 'login.failed', ip: ctx.ip, meta: { reason: 'locked' } }, now);
+      throw new AuthError('ACCOUNT_LOCKED', 'too many failed attempts, try again later', { retryAfterSec: Math.ceil((user.locked_until - now) / 1000) });
+    }
+    if (!ok) {
+      const r = this.users.recordLoginFailure(user.id, { maxFailures: this.options.loginMaxFailures, lockoutMs: this.options.lockoutMs, now });
+      this.events.record({ userId: user.id, type: 'login.failed', ip: ctx.ip, meta: { reason: 'bad_password', failures: r.failed_logins } }, now);
+      if (r.locked_until) this.events.record({ userId: user.id, type: 'account.locked', ip: ctx.ip }, now);
+      throw new AuthError('INVALID_CREDENTIALS', 'email or password is incorrect');
+    }
+    if (user.status === 'disabled') {
+      this.events.record({ userId: user.id, type: 'login.failed', ip: ctx.ip, meta: { reason: 'disabled' } }, now);
+      throw new AuthError('ACCOUNT_DISABLED', 'account is disabled');
+    }
+    if (this.options.loginRequiresVerifiedEmail && !user.email_verified_at) {
+      this.events.record({ userId: user.id, type: 'login.failed', ip: ctx.ip, meta: { reason: 'unverified' } }, now);
+      throw new AuthError('EMAIL_NOT_VERIFIED', 'verify your email before signing in');
+    }
+    this.users.recordLoginSuccess(user.id, now);
+    if (this.hasher.needsRehash(user.password_hash)) {
+      this.users.setPassword(user.id, await this.hasher.hash(input.password), now);
+    }
+    const { session, refreshToken } = this.sessions.create({ userId: user.id, ttlMs: this.options.refreshTtlMs, ip: ctx.ip, userAgent: ctx.userAgent }, now);
+    this.events.record({ userId: user.id, type: 'login.succeeded', ip: ctx.ip, meta: { sessionId: session.id } }, now);
+    const fresh = this.#requireUser(user.id);
+    return { user: fresh, tokens: await this.#tokenPair(fresh, session, refreshToken) };
+  }
+
+  /**
+   * Rotate a refresh token. A replayed (already rotated) token revokes the whole session.
+   * @param {string} refreshToken
+   * @param {Ctx} ctx
+   * @returns {Promise<{ user: UserRow, tokens: TokenPair }>}
+   */
+  async refresh(refreshToken, ctx) {
+    const now = this.now();
+    const found = this.sessions.findByToken(refreshToken);
+    if (!found) throw new AuthError('INVALID_TOKEN', 'refresh token is invalid');
+    const { session, current } = found;
+    if (session.revoked_at !== null) throw new AuthError('INVALID_TOKEN', 'session has been revoked');
+    if (!current) {
+      this.sessions.revoke(session.id, now);
+      this.events.record({ userId: session.user_id, type: 'session.reuse_detected', ip: ctx.ip, meta: { sessionId: session.id } }, now);
+      this.log.warn({ userId: session.user_id, sessionId: session.id, ip: ctx.ip }, 'refresh token reuse detected, session revoked');
+      throw new AuthError('TOKEN_REUSED', 'refresh token was already used; session revoked');
+    }
+    if (session.expires_at <= now) {
+      this.sessions.revoke(session.id, now);
+      throw new AuthError('INVALID_TOKEN', 'session expired');
+    }
+    const user = this.users.byId(session.user_id);
+    if (!user || user.status === 'disabled') {
+      this.sessions.revoke(session.id, now);
+      throw new AuthError('ACCOUNT_DISABLED', 'account is disabled');
+    }
+    const nextRefresh = this.sessions.rotate(session.id, { ip: ctx.ip, userAgent: ctx.userAgent, now });
+    const updated = /** @type {SessionRow} */ (this.sessions.byId(session.id));
+    this.events.record({ userId: user.id, type: 'session.refreshed', ip: ctx.ip, meta: { sessionId: session.id } }, now);
+    return { user, tokens: await this.#tokenPair(user, updated, nextRefresh) };
+  }
+
+  /**
+   * Revoke the session that owns this refresh token. Idempotent.
+   * @param {string} refreshToken
+   * @param {Ctx} ctx
+   */
+  logout(refreshToken, ctx) {
+    const found = this.sessions.findByToken(refreshToken);
+    if (!found) return;
+    if (this.sessions.revoke(found.session.id, this.now())) {
+      this.events.record({ userId: found.session.user_id, type: 'logout', ip: ctx.ip, meta: { sessionId: found.session.id } }, this.now());
+    }
+  }
+
+  /**
+   * Validate an access token and confirm its session and user are still live.
+   * @param {string} accessToken
+   * @returns {Promise<{ active: boolean, claims?: Awaited<ReturnType<JwtSigner['verify']>>, reason?: string }>}
+   */
+  async introspect(accessToken) {
+    let claims;
+    try {
+      claims = await this.jwt.verify(accessToken);
+    } catch (err) {
+      return { active: false, reason: /** @type {{ code?: string }} */ (err).code ?? 'INVALID' };
+    }
+    const session = this.sessions.byId(claims.sid);
+    if (!session || session.revoked_at !== null) return { active: false, claims, reason: 'SESSION_REVOKED' };
+    const user = this.users.byId(claims.sub);
+    if (!user || user.status !== 'active') return { active: false, claims, reason: 'ACCOUNT_DISABLED' };
+    return { active: true, claims };
+  }
+
+  /**
+   * @param {string} userId
+   * @returns {SessionRow[]}
+   */
+  listSessions(userId) {
+    this.#requireUser(userId);
+    return this.sessions.activeForUser(userId, this.now());
+  }
+
+  /**
+   * @param {string} userId
+   * @param {string} sessionId
+   * @param {Ctx} ctx
+   */
+  revokeSession(userId, sessionId, ctx) {
+    const s = this.sessions.byId(sessionId);
+    if (!s || s.user_id !== userId) throw new AuthError('SESSION_NOT_FOUND', 'session not found');
+    if (this.sessions.revoke(sessionId, this.now())) {
+      this.events.record({ userId, type: 'session.revoked', ip: ctx.ip, meta: { sessionId } }, this.now());
+    }
+  }
+
+  /**
+   * @param {string} userId
+   * @param {Ctx} ctx
+   * @returns {number} sessions revoked
+   */
+  revokeAllSessions(userId, ctx) {
+    this.#requireUser(userId);
+    const n = this.sessions.revokeAllForUser(userId, this.now());
+    this.events.record({ userId, type: 'sessions.revoked_all', ip: ctx.ip, meta: { count: n } }, this.now());
+    return n;
+  }
+
+  // ---------------------------------------------------------------- passwords
+
+  /**
+   * Always resolves, whether or not the email exists.
+   * @param {string} email
+   * @param {Ctx} ctx
+   */
+  async forgotPassword(email, ctx) {
+    const user = this.users.byEmail(email);
+    if (!user || user.status === 'disabled') return;
+    this.#assertResendAllowed(user.id, 'reset_password');
+    const now = this.now();
+    const token = this.tokens.issue({ userId: user.id, purpose: 'reset_password', ttlMs: this.options.resetTtlMs }, now);
+    this.events.record({ userId: user.id, type: 'password.reset_requested', ip: ctx.ip }, now);
+    try {
+      await this.mailer.sendPasswordReset({
+        to: user.email, name: user.name, url: this.options.resetUrlTemplate.replace('{token}', encodeURIComponent(token)),
+        expiresInMinutes: Math.round(this.options.resetTtlMs / 60_000), requestIp: ctx.ip,
+      });
+    } catch (err) {
+      this.log.error({ err, userId: user.id }, 'password reset email failed');
+    }
+  }
+
+  /**
+   * @param {{ token: string, password: string }} input
+   * @param {Ctx} ctx
+   * @returns {Promise<UserRow>}
+   */
+  async resetPassword(input, ctx) {
+    // Validate the new password before the token is spent, so a typo does not burn the link.
+    const peek = this.tokens.peek(input.token, 'reset_password', this.now());
+    if (!peek) throw new AuthError('INVALID_TOKEN', 'reset link is invalid or expired');
+    const user = this.#requireUser(peek.user_id);
+    this.#assertPasswordAcceptable(input.password, user.email);
+    const hash = await this.hasher.hash(input.password);
+    const now = this.now();
+    this.db.transaction(() => {
+      if (!this.tokens.consume(input.token, 'reset_password', now)) throw new AuthError('INVALID_TOKEN', 'reset link is invalid or expired');
+      this.users.setPassword(user.id, hash, now);
+      this.users.markVerified(user.id, now); // proved control of the mailbox
+      this.sessions.revokeAllForUser(user.id, now);
+      this.events.record({ userId: user.id, type: 'password.reset', ip: ctx.ip }, now);
+    });
+    return this.#requireUser(user.id);
+  }
+
+  /**
+   * Change password with the current one; revokes every other session.
+   * @param {{ userId: string, sessionId: string, currentPassword: string, newPassword: string }} input
+   * @param {Ctx} ctx
+   */
+  async changePassword(input, ctx) {
+    const user = this.#requireUser(input.userId);
+    if (!(await this.hasher.verify(input.currentPassword, user.password_hash))) {
+      this.events.record({ userId: user.id, type: 'password.change_failed', ip: ctx.ip }, this.now());
+      throw new AuthError('INVALID_CREDENTIALS', 'current password is incorrect');
+    }
+    this.#assertPasswordAcceptable(input.newPassword, user.email);
+    const hash = await this.hasher.hash(input.newPassword);
+    const now = this.now();
+    this.db.transaction(() => {
+      this.users.setPassword(user.id, hash, now);
+      for (const s of this.sessions.activeForUser(user.id, now)) {
+        if (s.id !== input.sessionId) this.sessions.revoke(s.id, now);
+      }
+      this.events.record({ userId: user.id, type: 'password.changed', ip: ctx.ip }, now);
+    });
+  }
+
+  // ---------------------------------------------------------------- administration
+
+  /**
+   * @param {string} userId
+   * @param {{ name?: string|null, status?: 'active'|'disabled' }} patch
+   * @param {Ctx} ctx
+   * @returns {UserRow}
+   */
+  updateUser(userId, patch, ctx) {
+    const user = this.#requireUser(userId);
+    const now = this.now();
+    this.db.transaction(() => {
+      if (patch.name !== undefined) this.users.setName(userId, patch.name, now);
+      if (patch.status !== undefined && patch.status !== user.status) {
+        this.users.setStatus(userId, patch.status, now);
+        if (patch.status === 'disabled') this.sessions.revokeAllForUser(userId, now);
+        this.events.record({ userId, type: patch.status === 'disabled' ? 'account.disabled' : 'account.enabled', ip: ctx.ip }, now);
+      }
+    });
+    return this.#requireUser(userId);
+  }
+
+  /**
+   * @param {string} userId
+   * @param {Ctx} ctx
+   */
+  deleteUser(userId, ctx) {
+    this.#requireUser(userId);
+    this.db.transaction(() => {
+      this.users.remove(userId);
+      this.events.record({ userId, type: 'account.deleted', ip: ctx.ip }, this.now());
+    });
+  }
+
+  // ---------------------------------------------------------------- internals
+
+  /**
+   * @param {UserRow} user
+   * @param {SessionRow} session
+   * @param {string} refreshToken
+   * @returns {Promise<TokenPair>}
+   */
+  async #tokenPair(user, session, refreshToken) {
+    const access = await this.jwt.sign({ sub: user.id, sid: session.id, email: user.email, email_verified: user.email_verified_at !== null }, this.now());
+    return { accessToken: access.token, accessTokenExpiresAt: access.expiresAt, refreshToken, refreshTokenExpiresAt: session.expires_at, sessionId: session.id };
+  }
+
+  /**
+   * @param {UserRow} user
+   * @returns {Promise<boolean>} whether the mail was accepted by notify
+   */
+  async #sendVerification(user) {
+    const token = this.tokens.issue({ userId: user.id, purpose: 'verify_email', ttlMs: this.options.verifyTtlMs }, this.now());
+    try {
+      await this.mailer.sendEmailVerification({
+        to: user.email, name: user.name, url: this.options.verifyUrlTemplate.replace('{token}', encodeURIComponent(token)),
+        expiresInMinutes: Math.round(this.options.verifyTtlMs / 60_000),
+      });
+      return true;
+    } catch (err) {
+      this.log.error({ err, userId: user.id }, 'verification email failed');
+      return false;
+    }
+  }
+
+  /**
+   * @param {string} userId
+   * @param {import('../types.js').TokenPurpose} purpose
+   */
+  #assertResendAllowed(userId, purpose) {
+    if (this.options.resendCooldownMs <= 0) return;
+    if (this.tokens.issuedSince(userId, purpose, this.now() - this.options.resendCooldownMs) > 0) {
+      throw new AuthError('TOO_MANY_REQUESTS', 'an email was sent recently, wait before requesting another', { retryAfterSec: Math.ceil(this.options.resendCooldownMs / 1000) });
+    }
+  }
+
+  /**
+   * @param {string} password
+   * @param {string} email
+   */
+  #assertPasswordAcceptable(password, email) {
+    const problems = this.policy.problems(password, { email });
+    if (problems.length) throw new AuthError('WEAK_PASSWORD', `password ${problems.join('; ')}`, { problems });
+  }
+
+  /** @param {string} id */
+  #requireUser(id) {
+    const user = this.users.byId(id);
+    if (!user) throw new AuthError('USER_NOT_FOUND', 'user not found');
+    return user;
+  }
+
+  /**
+   * Spend the same CPU as a real verification so a missing account is not detectable by timing.
+   * @param {string} password
+   */
+  async #burnHash(password) {
+    await this.hasher.verify(password, AuthService.#DUMMY_HASH);
+    return false;
+  }
+
+  static #DUMMY_HASH = 'scrypt$14$8$1$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+}

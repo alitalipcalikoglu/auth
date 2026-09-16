@@ -57,3 +57,85 @@ export function testDb() {
 export const silentLog = /** @type {any} */ (new Proxy({}, {
   get: (_t, prop) => (prop === 'child' ? () => silentLog : () => {}),
 }));
+
+/** Recording {@link Mailer}; set `fail` to make sends throw. */
+export class FakeMailer {
+  constructor() {
+    /** @type {{ kind: 'verify'|'reset', to: string, url: string, token: string, name: string|null }[]} */
+    this.sent = [];
+    /** @type {Error|null} */
+    this.fail = null;
+  }
+
+  /** @param {{ to: string, name: string|null, url: string }} m */
+  async sendEmailVerification(m) {
+    this.#push('verify', m);
+  }
+
+  /** @param {{ to: string, name: string|null, url: string }} m */
+  async sendPasswordReset(m) {
+    this.#push('reset', m);
+  }
+
+  async verify() {}
+
+  /**
+   * @param {'verify'|'reset'} kind
+   * @param {{ to: string, name: string|null, url: string }} m
+   */
+  #push(kind, m) {
+    if (this.fail) throw this.fail;
+    const token = decodeURIComponent(new URL(m.url).searchParams.get('token') ?? '');
+    this.sent.push({ kind, to: m.to, url: m.url, token, name: m.name });
+  }
+
+  /** Last token of a kind, for tests that follow the emailed link. */
+  lastToken(/** @type {'verify'|'reset'} */ kind) {
+    return this.sent.filter((s) => s.kind === kind).at(-1)?.token ?? '';
+  }
+}
+
+/**
+ * Fully wired AuthService on an in-memory database with a fake mailer and controllable clock.
+ * @param {Record<string, string>} [envOverrides]
+ */
+export async function testAuthService(envOverrides = {}) {
+  const { AuthService } = await import('../src/domain/auth-service.js');
+  const { PasswordPolicy } = await import('../src/domain/password-policy.js');
+  const { PasswordHasher } = await import('../src/crypto/password.js');
+  const { UserStore } = await import('../src/store/user-store.js');
+  const { SessionStore } = await import('../src/store/session-store.js');
+  const { ActionTokenStore } = await import('../src/store/action-token-store.js');
+  const { EventStore } = await import('../src/store/event-store.js');
+  const config = testConfig(envOverrides);
+  const db = testDb();
+  const { signer } = await testSigner({ ttlSec: config.accessTokenTtlSec });
+  const mailer = new FakeMailer();
+  const clock = { now: Date.now() };
+  const users = new UserStore(db);
+  const sessions = new SessionStore(db);
+  const tokens = new ActionTokenStore(db);
+  const events = new EventStore(db);
+  const service = new AuthService({
+    db, users, sessions, tokens, events,
+    hasher: new PasswordHasher({ logN: config.scryptLogN }),
+    policy: new PasswordPolicy({ minLength: config.passwordMinLength }),
+    jwt: signer, mailer, log: silentLog,
+    options: {
+      refreshTtlMs: config.refreshTokenTtlDays * 86_400_000,
+      verifyTtlMs: config.verifyTokenTtlMin * 60_000,
+      resetTtlMs: config.resetTokenTtlMin * 60_000,
+      loginMaxFailures: config.loginMaxFailures,
+      lockoutMs: config.loginLockoutMin * 60_000,
+      loginRequiresVerifiedEmail: config.loginRequiresVerifiedEmail,
+      resendCooldownMs: config.resendCooldownSec * 1000,
+      verifyUrlTemplate: config.verifyUrlTemplate,
+      resetUrlTemplate: config.resetUrlTemplate,
+    },
+    now: () => clock.now,
+  });
+  return { service, config, db, signer, mailer, clock, users, sessions, tokens, events };
+}
+
+export const ctx = { ip: '203.0.113.9', userAgent: 'test-agent' };
+export const GOOD_PASSWORD = 'correct horse battery staple';

@@ -32,6 +32,8 @@
  * @property {number} scryptLogN
  * @property {number} loginMaxFailures
  * @property {number} loginLockoutMin
+ * @property {boolean} loginRequiresVerifiedEmail
+ * @property {number} resendCooldownSec
  * @property {string} notifyUrl
  * @property {string} notifyApiKey
  * @property {number} notifyTimeoutMs
