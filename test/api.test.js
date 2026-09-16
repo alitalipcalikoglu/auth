@@ -1,0 +1,165 @@
+import assert from 'node:assert/strict';
+import { after, before, test } from 'node:test';
+import { AuthApi } from '../src/http/auth-api.js';
+import { API_KEY, ctx, GOOD_PASSWORD, OTHER_KEY, silentLog, testAuthService } from './helpers.js';
+
+/** @type {Awaited<ReturnType<typeof testAuthService>>} */
+let t;
+/** @type {import('fastify').FastifyInstance} */
+let app;
+const auth = { authorization: `Bearer ${API_KEY}`, 'x-client-ip': '198.51.100.7', 'x-client-user-agent': 'TestBrowser/1.0' };
+void ctx;
+
+/** @param {string} method @param {string} url @param {object} [payload] @param {Record<string,string>} [headers] */
+const call = (method, url, payload, headers = {}) => app.inject({ method: /** @type {any} */ (method), url, payload, headers: { ...auth, ...headers } });
+
+before(async () => {
+  t = await testAuthService({ RATE_LIMIT_MAX: '200', RESEND_COOLDOWN_SEC: '0' });
+  app = await new AuthApi({ config: t.config, service: t.service, jwt: t.signer, db: t.db, mailer: t.mailer, users: t.users, sessions: t.sessions, events: t.events, logger: silentLog }).build();
+  await app.ready();
+});
+after(() => app.close());
+
+test('public endpoints: health, ready, jwks; everything else needs an API key', async () => {
+  assert.equal((await app.inject('/health')).statusCode, 200);
+  assert.equal((await app.inject('/ready')).statusCode, 200);
+  const jwks = await app.inject('/.well-known/jwks.json');
+  assert.equal(jwks.statusCode, 200);
+  assert.equal(jwks.json().keys[0].kid, t.signer.kid);
+  assert.match(String(jwks.headers['cache-control']), /max-age/);
+  for (const url of ['/v1/users', '/metrics']) {
+    const res = await app.inject({ url });
+    assert.equal(res.statusCode, 401, url);
+    assert.equal(res.json().error.code, 'UNAUTHORIZED');
+  }
+  assert.equal((await app.inject({ url: '/nope', headers: auth })).statusCode, 404);
+  assert.equal((await call('GET', '/v1/users')).headers['cache-control'], 'no-store');
+});
+
+test('register, list, get, verify, login, refresh, logout over HTTP', async () => {
+  let res = await call('POST', '/v1/users', { email: 'Ali@Example.com', password: GOOD_PASSWORD, name: 'Ali' });
+  assert.equal(res.statusCode, 201);
+  const { user, verificationEmailSent } = res.json();
+  assert.equal(user.email, 'ali@example.com');
+  assert.equal(user.emailVerified, false);
+  assert.equal(verificationEmailSent, true);
+  assert.equal('password_hash' in user, false);
+  assert.equal(res.headers.location, `/v1/users/${user.id}`);
+
+  res = await call('POST', '/v1/users', { email: 'ali@example.com', password: GOOD_PASSWORD });
+  assert.equal(res.statusCode, 409);
+  assert.equal(res.json().error.code, 'EMAIL_TAKEN');
+  res = await call('POST', '/v1/users', { email: 'x@example.com', password: 'short' });
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.json().error.code, 'WEAK_PASSWORD');
+  assert.ok(res.json().error.details.problems.length);
+  res = await call('POST', '/v1/users', { email: 'not-an-email', password: GOOD_PASSWORD });
+  assert.equal(res.json().error.code, 'VALIDATION_FAILED');
+  res = await call('POST', '/v1/users', { email: 'x@example.com', password: GOOD_PASSWORD, extra: 1 });
+  assert.equal(res.statusCode, 400, 'unknown fields rejected');
+
+  res = await call('GET', '/v1/users?email=ALI@example.com');
+  assert.equal(res.json().items[0].id, user.id);
+  res = await call('GET', `/v1/users/${user.id}`);
+  assert.equal(res.json().user.id, user.id);
+  assert.equal((await call('GET', '/v1/users/00000000-0000-4000-8000-000000000000')).statusCode, 404);
+  assert.equal((await call('GET', '/v1/users/not-uuid')).statusCode, 400);
+
+  res = await call('POST', '/v1/auth/verify-email', { token: 'wrong-token' });
+  assert.equal(res.statusCode, 401);
+  assert.equal(res.json().error.code, 'INVALID_TOKEN');
+  res = await call('POST', '/v1/auth/verify-email', { token: t.mailer.lastToken('verify') });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().user.emailVerified, true);
+
+  res = await call('POST', '/v1/auth/login', { email: 'ali@example.com', password: 'wrong password' });
+  assert.equal(res.statusCode, 401);
+  res = await call('POST', '/v1/auth/login', { email: 'ali@example.com', password: GOOD_PASSWORD });
+  assert.equal(res.statusCode, 200);
+  const { tokens } = res.json();
+  assert.equal(tokens.tokenType, 'Bearer');
+  assert.ok(Date.parse(tokens.accessTokenExpiresAt) > Date.now());
+
+  res = await call('POST', '/v1/auth/introspect', { accessToken: tokens.accessToken });
+  assert.equal(res.json().active, true);
+  assert.equal(res.json().claims.sub, user.id);
+
+  res = await call('POST', '/v1/auth/refresh', { refreshToken: tokens.refreshToken });
+  assert.equal(res.statusCode, 200);
+  const rotated = res.json().tokens;
+  res = await call('POST', '/v1/auth/refresh', { refreshToken: tokens.refreshToken });
+  assert.equal(res.statusCode, 401);
+  assert.equal(res.json().error.code, 'TOKEN_REUSED');
+  res = await call('POST', '/v1/auth/introspect', { accessToken: rotated.accessToken });
+  assert.deepEqual({ active: res.json().active, reason: res.json().reason }, { active: false, reason: 'SESSION_REVOKED' });
+
+  res = await call('POST', '/v1/auth/login', { email: 'ali@example.com', password: GOOD_PASSWORD });
+  const live = res.json().tokens;
+  res = await call('GET', `/v1/users/${user.id}/sessions`);
+  assert.equal(res.json().items.length, 1);
+  assert.equal(res.json().items[0].ip, '198.51.100.7', 'X-Client-IP recorded');
+  assert.equal(res.json().items[0].userAgent, 'TestBrowser/1.0');
+  assert.equal((await call('POST', '/v1/auth/logout', { refreshToken: live.refreshToken })).statusCode, 204);
+  assert.equal((await call('GET', `/v1/users/${user.id}/sessions`)).json().items.length, 0);
+
+  res = await call('GET', `/v1/users/${user.id}/events?limit=3`);
+  assert.equal(res.json().items.length, 3);
+  assert.ok(res.json().nextBefore);
+  assert.equal(res.json().items[0].type, 'logout');
+  assert.equal(res.json().items[0].ip, '198.51.100.7');
+});
+
+test('password flows: forgot, reset, change with X-Access-Token', async () => {
+  let res = await call('POST', '/v1/users', { email: 'p@example.com', password: GOOD_PASSWORD });
+  const userId = res.json().user.id;
+  assert.equal((await call('POST', '/v1/auth/password/forgot', { email: 'nobody@example.com' })).statusCode, 202);
+  assert.equal((await call('POST', '/v1/auth/password/forgot', { email: 'p@example.com' })).statusCode, 202);
+  res = await call('POST', '/v1/auth/password/reset', { token: t.mailer.lastToken('reset'), password: 'a brand new strong password' });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().user.emailVerified, true);
+
+  res = await call('POST', '/v1/auth/login', { email: 'p@example.com', password: 'a brand new strong password' });
+  const { accessToken } = res.json().tokens;
+  res = await call('POST', '/v1/auth/password/change', { currentPassword: 'a brand new strong password', newPassword: 'yet another strong one' });
+  assert.equal(res.statusCode, 401, 'missing X-Access-Token');
+  res = await call('POST', '/v1/auth/password/change', { currentPassword: 'wrong', newPassword: 'yet another strong one' }, { 'x-access-token': accessToken });
+  assert.equal(res.statusCode, 401);
+  assert.equal(res.json().error.code, 'INVALID_CREDENTIALS');
+  res = await call('POST', '/v1/auth/password/change', { currentPassword: 'a brand new strong password', newPassword: 'yet another strong one' }, { 'x-access-token': accessToken });
+  assert.equal(res.statusCode, 204);
+  assert.equal((await call('POST', '/v1/auth/login', { email: 'p@example.com', password: 'yet another strong one' })).statusCode, 200);
+
+  res = await call('PATCH', `/v1/users/${userId}`, { status: 'disabled' });
+  assert.equal(res.json().user.status, 'disabled');
+  res = await call('POST', '/v1/auth/login', { email: 'p@example.com', password: 'yet another strong one' });
+  assert.equal(res.statusCode, 403);
+  assert.equal((await call('PATCH', `/v1/users/${userId}`, {})).statusCode, 400, 'empty patch rejected');
+  assert.equal((await call('DELETE', `/v1/users/${userId}`)).statusCode, 204);
+  assert.equal((await call('GET', `/v1/users/${userId}`)).statusCode, 404);
+});
+
+test('lockout returns 423 with Retry-After; metrics and user paging work', async () => {
+  const locked = await testAuthService({ LOGIN_MAX_FAILURES: '3' });
+  const lockedApp = await new AuthApi({ config: locked.config, service: locked.service, jwt: locked.signer, db: locked.db, mailer: locked.mailer, users: locked.users, sessions: locked.sessions, events: locked.events, logger: silentLog }).build();
+  await lockedApp.inject({ method: 'POST', url: '/v1/users', headers: auth, payload: { email: 'l@example.com', password: GOOD_PASSWORD } });
+  for (let i = 0; i < 3; i++) await lockedApp.inject({ method: 'POST', url: '/v1/auth/login', headers: auth, payload: { email: 'l@example.com', password: 'nope' } });
+  const res = await lockedApp.inject({ method: 'POST', url: '/v1/auth/login', headers: auth, payload: { email: 'l@example.com', password: GOOD_PASSWORD } });
+  assert.equal(res.statusCode, 423);
+  assert.ok(Number(res.headers['retry-after']) > 0);
+  await lockedApp.close();
+
+  for (let i = 0; i < 3; i++) await call('POST', '/v1/users', { email: `page${i}@example.com`, password: GOOD_PASSWORD });
+  let page = await call('GET', '/v1/users?limit=2');
+  assert.equal(page.json().items.length, 2);
+  assert.ok(page.json().nextCursor);
+  page = await call('GET', `/v1/users?limit=2&cursor=${page.json().nextCursor}`);
+  assert.ok(page.json().items.length >= 1);
+  assert.equal((await call('GET', '/v1/users?cursor=garbage')).json().error.code, 'INVALID_CURSOR');
+
+  const metrics = await call('GET', '/metrics');
+  assert.match(metrics.body, /auth_users\{status="active"\} \d+/);
+  assert.match(metrics.body, /auth_sessions_active \d+/);
+
+  const other = await app.inject({ url: '/v1/users', headers: { authorization: `Bearer ${OTHER_KEY}` } });
+  assert.equal(other.statusCode, 200, 'second key works');
+});
