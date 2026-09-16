@@ -85,6 +85,10 @@ const jwks = createRemoteJWKSet(new URL('https://auth.example.com/.well-known/jw
 const { payload } = await jwtVerify(token, jwks, { issuer: 'https://auth.example.com', audience: 'shop' });
 ```
 
+## Examples
+
+Scenario walkthroughs for every feature live in [examples/](examples/README.md).
+
 ## Configuration
 
 All settings come from environment variables and are validated at startup. See [.env.example](.env.example).
