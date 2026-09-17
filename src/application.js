@@ -1,5 +1,6 @@
 import { Config } from './config.js';
-import { AuditClient } from './net/audit-client.js';
+import { AuditClient } from '@atc-web/service-core/audit';
+import { Lifecycle } from '@atc-web/service-core/lifecycle';
 import { AuditEvents } from './domain/audit-events.js';
 import { JwtSigner } from './crypto/jwt.js';
 import { PasswordHasher } from './crypto/password.js';
@@ -41,7 +42,8 @@ export class Application {
     this.app = null;
     /** @type {Maintenance|null} */
     this.maintenance = null;
-    this.shuttingDown = false;
+    /** @type {(reason: string) => Promise<void>} */
+    this.shutdown = async () => {};
   }
 
   /** Build from `process.env`; exits with a readable message on bad configuration. */
@@ -82,7 +84,17 @@ export class Application {
     this.app = app;
     service.log = app.log.child({ component: 'auth' });
     this.maintenance = new Maintenance({ sessions: this.sessions, tokens: this.tokens, events: this.events, log: app.log.child({ component: 'maintenance' }), options: { eventRetentionDays: config.eventRetentionDays } });
-    this.#installSignalHandlers(app.log);
+    const { shutdown } = Lifecycle.install({
+      forceExitMs: 30_000,
+      log: app.log,
+      steps: [
+        () => this.maintenance?.stop(),
+        () => this.app?.close(),
+        () => this.audit.close(),
+        () => this.db.close(),
+      ],
+    });
+    this.shutdown = shutdown;
     this.audit.logger = app.log;
     this.audit.start();
     await app.listen({ port: config.port, host: config.host });
@@ -91,41 +103,4 @@ export class Application {
     if (process.send) process.send('ready'); // PM2 wait_ready
   }
 
-  /** @param {string} reason */
-  async shutdown(reason) {
-    if (this.shuttingDown) return;
-    this.shuttingDown = true;
-    const log = /** @type {import('./types.js').Logger} */ (this.app?.log ?? console);
-    log.info({ reason }, 'shutting down');
-    const forceExit = setTimeout(() => {
-      log.error('shutdown timed out, exiting');
-      process.exit(1);
-    }, 30_000).unref();
-    try {
-      this.maintenance?.stop();
-      await this.app?.close();
-      await this.audit.close();
-      this.db.close();
-      clearTimeout(forceExit);
-      log.info('shutdown complete');
-      process.exit(0);
-    } catch (err) {
-      log.error({ err }, 'shutdown failed');
-      process.exit(1);
-    }
-  }
-
-  /** @param {import('./types.js').Logger} log */
-  #installSignalHandlers(log) {
-    process.on('SIGTERM', () => this.shutdown('SIGTERM'));
-    process.on('SIGINT', () => this.shutdown('SIGINT'));
-    process.on('unhandledRejection', (reason) => {
-      log.fatal({ err: reason }, 'unhandled rejection');
-      this.shutdown('unhandledRejection');
-    });
-    process.on('uncaughtException', (err) => {
-      log.fatal({ err }, 'uncaught exception');
-      process.exit(1);
-    });
-  }
 }

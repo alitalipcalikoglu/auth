@@ -3,7 +3,8 @@ import { readFileSync } from 'node:fs';
 import { isIP } from 'node:net';
 import rateLimit from '@fastify/rate-limit';
 import Fastify from 'fastify';
-import { AuditClient } from '../net/audit-client.js';
+import { AuditClient } from '@atc-web/service-core/audit';
+import { registerProbes } from '@atc-web/service-core/fastify';
 import { AuthError } from '../domain/errors.js';
 import { ApiKeyAuth } from './api-key-auth.js';
 import { Schemas } from './schemas.js';
@@ -49,7 +50,7 @@ export class AuthApi {
    * @param {import('../store/session-store.js').SessionStore} deps.sessions
    * @param {import('../store/event-store.js').EventStore} deps.events
    * @param {import('../types.js').Logger} [deps.logger]
-   * @param {import('../net/audit-client.js').AuditClient} [deps.audit]
+   * @param {import('@atc-web/service-core/audit').AuditClient} [deps.audit]
    */
   constructor({ config, audit, service, jwt, db, mailer, users, sessions, events, logger }) {
     this.config = config;
@@ -63,7 +64,6 @@ export class AuthApi {
     this.events = events;
     this.logger = logger;
     this.auth = new ApiKeyAuth(config.apiKeys);
-    this.readyCache = { at: 0, ok: false, error: '' };
   }
 
   /** @returns {Promise<FastifyInstance>} */
@@ -129,33 +129,14 @@ export class AuthApi {
 
   /** @param {FastifyInstance} app */
   #registerPublic(app) {
-    app.get('/health', { logLevel: 'warn' }, async () => ({ status: 'ok' }));
-    app.get('/ready', { logLevel: 'warn' }, async (_request, reply) => {
-      const ready = await this.#readiness();
-      if (!ready.ok) {
-        app.log.warn({ error: ready.error }, 'readiness check failed');
-        return reply.code(503).send({ status: 'unavailable', error: ready.error });
-      }
-      return { status: 'ok' };
-    });
+    registerProbes(app, async () => {
+      this.db.ping();
+      await this.mailer.verify();
+    }, { cacheMs: AuthApi.READY_CACHE_MS });
     app.get('/.well-known/jwks.json', { logLevel: 'warn' }, async (_request, reply) => {
       reply.header('cache-control', 'public, max-age=300');
       return this.jwt.jwks();
     });
-  }
-
-  async #readiness() {
-    const now = Date.now();
-    if (now - this.readyCache.at > AuthApi.READY_CACHE_MS) {
-      try {
-        this.db.ping();
-        await this.mailer.verify();
-        this.readyCache = { at: now, ok: true, error: '' };
-      } catch (err) {
-        this.readyCache = { at: now, ok: false, error: err instanceof Error ? err.message : String(err) };
-      }
-    }
-    return this.readyCache;
   }
 
   /** @param {FastifyInstance} api */

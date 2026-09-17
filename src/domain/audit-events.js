@@ -1,4 +1,4 @@
-/** @typedef {import('../net/audit-client.js').AuditEvent} AuditEvent */
+/** @typedef {import('@atc-web/service-core/audit').AuditEvent} AuditEvent */
 
 /**
  * Maps the security events this service stores per user onto audit-service events: every event

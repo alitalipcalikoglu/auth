@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { AuditEvents } from '../src/domain/audit-events.js';
-import { AuditClient } from '../src/net/audit-client.js';
+import { AuditClient } from '@atc-web/service-core/audit';
 import { Database } from '../src/db.js';
 import { EventStore } from '../src/store/event-store.js';
 
