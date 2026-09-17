@@ -56,7 +56,7 @@ Errors are JSON: `{ "error": { "code", "message", "details?" } }`. `423` and `42
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/health`, `/ready` | Liveness; readiness (database + notify reachable, cached 30 s). No auth. |
+| GET | `/health`, `/ready`, `/v1/info` | Liveness; readiness (database + notify reachable, cached 30 s); service identity (version, API version, capabilities, schema version, service-core version). No auth. |
 | GET | `/.well-known/jwks.json` | Public keys for local JWT verification. No auth. |
 | POST | `/v1/users` | Register `{ email, password, name? }`. `201` with `user` and `verificationEmailSent`. |
 | GET | `/v1/users` | List (`limit`, `cursor`) or look up `?email=`. |
