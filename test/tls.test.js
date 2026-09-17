@@ -16,7 +16,7 @@ test('serves HTTPS when TLS_CERT_PATH and TLS_KEY_PATH are set', async () => {
   const key = join(dir, 'key.pem');
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', key, '-out', cert, '-days', '1', '-subj', '/CN=localhost'], { stdio: 'ignore' });
   const t = await testAuthService({ TLS_CERT_PATH: cert, TLS_KEY_PATH: key });
-  const app = await new AuthApi({ config: t.config, service: t.service, jwt: t.signer, db: t.db, mailer: t.mailer, users: t.users, sessions: t.sessions, events: t.events, logger: silentLog }).build();
+  const app = await new AuthApi({ config: t.config, service: t.service, jwt: t.signer, db: t.db, mailer: t.mailer, users: t.users, sessions: t.sessions, events: t.events, version: '1.0.0', logger: silentLog }).build();
   await app.listen({ port: 0, host: '127.0.0.1' });
   try {
     const addr = /** @type {import('node:net').AddressInfo} */ (app.server.address());

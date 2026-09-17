@@ -1,5 +1,6 @@
 import { Config } from './config.js';
 import { AuditClient } from '@atc-web/service-core/audit';
+import { readServiceVersion } from '@atc-web/service-core/fastify';
 import { Lifecycle } from '@atc-web/service-core/lifecycle';
 import { AuditEvents } from './domain/audit-events.js';
 import { JwtSigner } from './crypto/jwt.js';
@@ -23,6 +24,7 @@ export class Application {
   /** @param {Config} config */
   constructor(config) {
     this.config = config;
+    this.version = readServiceVersion(import.meta.url);
     this.db = new Database(config.dbPath, { backupDir: config.dbBackupDir });
     this.users = new UserStore(this.db);
     this.sessions = new SessionStore(this.db);
@@ -88,7 +90,7 @@ export class Application {
         resetUrlTemplate: config.resetUrlTemplate,
       },
     });
-    const api = new AuthApi({ config, service, jwt: this.jwt, db: this.db, mailer: this.mailer, users: this.users, sessions: this.sessions, events: this.events });
+    const api = new AuthApi({ config, service, jwt: this.jwt, db: this.db, mailer: this.mailer, users: this.users, sessions: this.sessions, events: this.events, version: this.version });
     const app = await api.build();
     this.app = app;
     service.log = app.log.child({ component: 'auth' });

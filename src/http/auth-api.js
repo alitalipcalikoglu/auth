@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { isIP } from 'node:net';
 import rateLimit from '@fastify/rate-limit';
 import Fastify from 'fastify';
-import { registerProbes } from '@atc-web/service-core/fastify';
+import { registerInfo, registerProbes } from '@atc-web/service-core/fastify';
 import { AuthError } from '../domain/errors.js';
 import { ApiKeyAuth } from './api-key-auth.js';
 import { Schemas } from './schemas.js';
@@ -48,9 +48,10 @@ export class AuthApi {
    * @param {import('../store/user-store.js').UserStore} deps.users
    * @param {import('../store/session-store.js').SessionStore} deps.sessions
    * @param {import('../store/event-store.js').EventStore} deps.events
+   * @param {string} deps.version
    * @param {import('../types.js').Logger} [deps.logger]
    */
-  constructor({ config, service, jwt, db, mailer, users, sessions, events, logger }) {
+  constructor({ config, service, jwt, db, mailer, users, sessions, events, version, logger }) {
     this.config = config;
     this.service = service;
     this.jwt = jwt;
@@ -59,6 +60,7 @@ export class AuthApi {
     this.users = users;
     this.sessions = sessions;
     this.events = events;
+    this.version = version;
     this.logger = logger;
     this.auth = new ApiKeyAuth(config.apiKeys);
   }
@@ -134,6 +136,12 @@ export class AuthApi {
       this.db.ping();
       await this.mailer.verify();
     }, { cacheMs: AuthApi.READY_CACHE_MS });
+    registerInfo(app, {
+      service: 'auth',
+      version: this.version,
+      capabilities: ['jwks', 'email-verification', 'password-reset', 'refresh-tokens'],
+      schemaVersion: this.db.schemaVersion,
+    });
     app.get('/.well-known/jwks.json', { logLevel: 'warn' }, async (_request, reply) => {
       reply.header('cache-control', 'public, max-age=300');
       return this.jwt.jwks();

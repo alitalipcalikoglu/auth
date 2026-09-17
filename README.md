@@ -42,6 +42,14 @@ npm run typecheck
 - **Refresh token**: opaque 256-bit secret, stored hashed, `REFRESH_TOKEN_TTL_DAYS` absolute lifetime. Each refresh rotates it. Presenting an already-rotated token revokes the whole session (`TOKEN_REUSED`).
 - **One-time links** for verification and reset are opaque tokens that expire and are single use. The service never builds pages; it puts `{token}` into `VERIFY_URL_TEMPLATE` / `RESET_URL_TEMPLATE`, which point at your frontend, and your backend forwards the token here.
 
+## Boundaries
+
+**Purpose:** the platform's identity provider — accounts, sessions, tokens, and the audit trail of who did what to them.
+
+**Responsibilities:** user CRUD; password hashing and reset; session issuance and rotating refresh tokens; JWT signing and JWKS publication; email verification; per-key rate limiting on its own endpoints; forwarding auth security events to audit.
+
+**Non-responsibilities:** auth ≠ general notification delivery — it triggers notify for verification/reset emails, it does not send them itself; auth does not decide what a caller may do once identified (that's each service's own API-key roles/scopes); it does not store business/profile data beyond what identity and session state require.
+
 ## API
 
 Errors are JSON: `{ "error": { "code", "message", "details?" } }`. `423` and `429` carry `Retry-After`.

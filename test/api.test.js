@@ -15,10 +15,22 @@ const call = (method, url, payload, headers = {}) => app.inject({ method: /** @t
 
 before(async () => {
   t = await testAuthService({ RATE_LIMIT_MAX: '200', RESEND_COOLDOWN_SEC: '0' });
-  app = await new AuthApi({ config: t.config, service: t.service, jwt: t.signer, db: t.db, mailer: t.mailer, users: t.users, sessions: t.sessions, events: t.events, logger: silentLog }).build();
+  app = await new AuthApi({ config: t.config, service: t.service, jwt: t.signer, db: t.db, mailer: t.mailer, users: t.users, sessions: t.sessions, events: t.events, version: '1.0.0', logger: silentLog }).build();
   await app.ready();
 });
 after(() => app.close());
+
+test('GET /v1/info reports service identity and capabilities', async () => {
+  const res = await call('GET', '/v1/info');
+  assert.equal(res.statusCode, 200);
+  const body = res.json();
+  assert.equal(body.service, 'auth');
+  assert.equal(body.version, '1.0.0');
+  assert.equal(body.apiVersion, 'v1');
+  assert.deepEqual(body.capabilities, ['jwks', 'email-verification', 'password-reset', 'refresh-tokens']);
+  assert.equal(typeof body.schemaVersion, 'number');
+  assert.equal(typeof body.serviceCore, 'string');
+});
 
 test('public endpoints: health, ready, jwks; everything else needs an API key', async () => {
   assert.equal((await app.inject('/health')).statusCode, 200);
@@ -140,7 +152,7 @@ test('password flows: forgot, reset, change with X-Access-Token', async () => {
 
 test('lockout returns 423 with Retry-After; metrics and user paging work', async () => {
   const locked = await testAuthService({ LOGIN_MAX_FAILURES: '3' });
-  const lockedApp = await new AuthApi({ config: locked.config, service: locked.service, jwt: locked.signer, db: locked.db, mailer: locked.mailer, users: locked.users, sessions: locked.sessions, events: locked.events, logger: silentLog }).build();
+  const lockedApp = await new AuthApi({ config: locked.config, service: locked.service, jwt: locked.signer, db: locked.db, mailer: locked.mailer, users: locked.users, sessions: locked.sessions, events: locked.events, version: '1.0.0', logger: silentLog }).build();
   await lockedApp.inject({ method: 'POST', url: '/v1/users', headers: auth, payload: { email: 'l@example.com', password: GOOD_PASSWORD } });
   for (let i = 0; i < 3; i++) await lockedApp.inject({ method: 'POST', url: '/v1/auth/login', headers: auth, payload: { email: 'l@example.com', password: 'nope' } });
   const res = await lockedApp.inject({ method: 'POST', url: '/v1/auth/login', headers: auth, payload: { email: 'l@example.com', password: GOOD_PASSWORD } });
