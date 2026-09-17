@@ -52,6 +52,20 @@ export class PasswordHasher {
   }
 
   /**
+   * A syntactically valid hash string at the given cost, with no real password behind it: fixed
+   * all-zero salt and key. `PasswordHasher#verify` derives against it in constant work for that
+   * cost, so it is safe to use for burning CPU on a login attempt against an unknown account —
+   * the point is the cost parameters, not the bytes. Never store or compare this as a real hash.
+   * @param {number} logN
+   * @param {number} [r]
+   * @param {number} [p]
+   */
+  static dummyHash(logN, r = PasswordHasher.R, p = PasswordHasher.P) {
+    const zero = (/** @type {number} */ n) => Buffer.alloc(n).toString('base64url');
+    return ['scrypt', logN, r, p, zero(PasswordHasher.SALT_BYTES), zero(PasswordHasher.KEY_BYTES)].join('$');
+  }
+
+  /**
    * @param {string} stored
    * @returns {{ logN: number, r: number, p: number, salt: Buffer, hash: Buffer }|null}
    */

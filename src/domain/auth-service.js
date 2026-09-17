@@ -1,3 +1,4 @@
+import { PasswordHasher } from '../crypto/password.js';
 import { UserStore } from '../store/user-store.js';
 import { AuthError } from './errors.js';
 
@@ -5,7 +6,6 @@ import { AuthError } from './errors.js';
 /** @typedef {import('../types.js').SessionRow} SessionRow */
 /** @typedef {import('../types.js').Logger} Logger */
 /** @typedef {import('../crypto/jwt.js').JwtSigner} JwtSigner */
-/** @typedef {import('../crypto/password.js').PasswordHasher} PasswordHasher */
 /** @typedef {import('../store/session-store.js').SessionStore} SessionStore */
 /** @typedef {import('../store/action-token-store.js').ActionTokenStore} ActionTokenStore */
 /** @typedef {import('../store/event-store.js').EventStore} EventStore */
@@ -74,6 +74,9 @@ export class AuthService {
     this.log = log;
     this.options = options;
     this.now = now;
+    // Same cost as a real verification (logN/r/p from the configured hasher), so a login attempt
+    // against an unknown e-mail takes the same time as one against a real, wrong password.
+    this.#dummyHash = PasswordHasher.dummyHash(hasher.logN);
   }
 
   // ---------------------------------------------------------------- registration & verification
@@ -436,9 +439,10 @@ export class AuthService {
    * @param {string} password
    */
   async #burnHash(password) {
-    await this.hasher.verify(password, AuthService.#DUMMY_HASH);
+    await this.hasher.verify(password, this.#dummyHash);
     return false;
   }
 
-  static #DUMMY_HASH = 'scrypt$14$8$1$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+  /** @type {string} */
+  #dummyHash;
 }

@@ -26,6 +26,22 @@ test('PasswordHasher.needsRehash flags weaker parameters', async () => {
   assert.throws(() => new PasswordHasher({ logN: 8 }), RangeError);
 });
 
+test('PasswordHasher.dummyHash: same cost parameters as a real hash at that logN, no real password behind it', async () => {
+  const dummy14 = PasswordHasher.dummyHash(14);
+  const dummy15 = PasswordHasher.dummyHash(15);
+  assert.match(dummy14, /^scrypt\$14\$8\$1\$[A-Za-z0-9_-]+\$[A-Za-z0-9_-]+$/);
+  assert.match(dummy15, /^scrypt\$15\$8\$1\$[A-Za-z0-9_-]+\$[A-Za-z0-9_-]+$/);
+  const parsed14 = PasswordHasher.parse(dummy14);
+  const parsed15 = PasswordHasher.parse(dummy15);
+  assert.deepEqual([parsed14?.logN, parsed15?.logN], [14, 15], 'cost parameter follows the requested logN, not a fixed value');
+  // A hasher configured at logN 15 must burn as much CPU verifying against the dummy as against a
+  // real logN-15 hash: same cost parameters, so the scrypt work factor (N = 2^logN) matches.
+  const h15 = new PasswordHasher({ logN: 15 });
+  assert.equal(await h15.verify('anything', dummy15), false, 'dummy hash never verifies as a match');
+  assert.equal(new PasswordHasher({ logN: 15 }).needsRehash(dummy14), true, 'a logN-14 dummy is recognised as weaker cost than 15');
+  assert.equal(new PasswordHasher({ logN: 15 }).needsRehash(dummy15), false, 'a logN-15 dummy matches the current cost exactly');
+});
+
 test('OpaqueToken generates 256-bit url-safe secrets with stable hashes', () => {
   const { token, hash } = OpaqueToken.generate();
   assert.equal(OpaqueToken.looksValid(token), true);

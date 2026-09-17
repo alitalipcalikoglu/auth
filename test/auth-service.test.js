@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { PasswordHasher } from '../src/crypto/password.js';
 import { AuthError } from '../src/domain/errors.js';
 import { PasswordPolicy } from '../src/domain/password-policy.js';
 import { ctx, GOOD_PASSWORD, testAuthService } from './helpers.js';
@@ -65,6 +66,18 @@ test('registration succeeds when the mailer fails and resend is throttled', asyn
   await t.service.resendVerification('a@example.com', ctx);
   assert.equal(t.mailer.sent.length, 1);
   t.service.verifyEmail(t.mailer.lastToken('verify'), ctx);
+});
+
+test('an unknown e-mail burns CPU at the configured scrypt cost, not a hardcoded one', async () => {
+  const t = await testAuthService({ SCRYPT_LOG_N: '16' });
+  /** @type {string[]} */
+  const verifiedAgainst = [];
+  const realVerify = t.service.hasher.verify.bind(t.service.hasher);
+  t.service.hasher.verify = (password, stored) => { verifiedAgainst.push(stored); return realVerify(password, stored); };
+  await rejectsWith(t.service.login({ email: 'nobody@example.com', password: 'x' }, ctx), 'INVALID_CREDENTIALS');
+  assert.equal(verifiedAgainst.length, 1);
+  const parsed = PasswordHasher.parse(verifiedAgainst[0]);
+  assert.equal(parsed?.logN, 16, 'the dummy hash used for an unknown account matches the configured SCRYPT_LOG_N, not a fixed logN 14');
 });
 
 test('login failures lock the account, disabled accounts and unverified emails are refused', async () => {
