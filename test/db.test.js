@@ -5,7 +5,7 @@ import { Database } from '../src/db.js';
 test('Database applies migrations once and enforces foreign keys', () => {
   const db = new Database(':memory:');
   const tables = /** @type {{ name: string }[]} */ (db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all()).map((r) => r.name);
-  assert.deepEqual(tables, ['action_tokens', 'events', 'sessions', 'users']);
+  assert.deepEqual(tables, ['action_tokens', 'events', 'schema_migrations', 'sessions', 'users']);
   assert.equal(/** @type {{ user_version: number }} */ (db.prepare('PRAGMA user_version').get()).user_version, Database.MIGRATIONS.length);
   assert.throws(() => db.prepare("INSERT INTO sessions (id,user_id,token_hash,created_at,last_used_at,expires_at) VALUES ('s','missing','h',0,0,0)").run(), /FOREIGN KEY/);
   db.ping();

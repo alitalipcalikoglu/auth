@@ -149,8 +149,17 @@ does.
 
 ## Backup / restore
 
-Back up the database and the JWT signing key files together; restoring the database with a
-different signing key invalidates every outstanding access token immediately.
+Back up the database and the JWT signing key files (`keys/`) together; restoring the database with
+a different signing key invalidates every outstanding access token immediately. `stack backup`/
+`stack restore` from the workspace root (see `stack/docs/UPGRADE.md`) captures the database and
+`keys/` together for exactly this reason. On every start, before applying a pending migration to an
+existing database, the service itself also snapshots the database file to
+`DB_PATH.pre-v<N>-<timestamp>` (directory overridable with `DB_BACKUP_DIR`) — a manual last resort
+that still needs `keys/` restored alongside it.
+
+**Rollback limitations:** none of the migrations are reversible; to roll back, restore the database
+and `keys/` from the same `stack backup` snapshot (or the pre-migration database copy plus a
+same-time copy of `keys/`) and run the previous version of this service against it.
 
 See [docs/READINESS.md](docs/READINESS.md) for the full contract.
 

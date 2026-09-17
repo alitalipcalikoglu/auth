@@ -19,6 +19,7 @@
  * @property {{ url: string, apiKey: string }|null} audit   Audit service to forward events to; null = off.
  * @property {number} bodyLimit
  * @property {string} dbPath
+ * @property {string} [dbBackupDir]
  * @property {ApiKey[]} apiKeys
  * @property {number} rateLimitMax
  * @property {string} jwtPrivateKeyPath       PEM, PKCS#8, EC P-256.
