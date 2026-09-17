@@ -134,6 +134,26 @@ Class-based; dependencies are injected through constructors, `src/application.js
 
 With `AUDIT_URL` and `AUDIT_API_KEY` set, every security event this service records per user (registration, verification, login success and failure with the reason, lockout, refresh, logout, session revocation, password reset and change, account disable/enable/delete) is also forwarded to the audit service as `auth.<event type>` with the user as actor and target, the client IP and the event's metadata. Attempts that did not succeed carry `outcome: "failure"`. Forwarding is buffered and never slows down or fails a request. Details: [examples/audit-events.md](examples/audit-events.md).
 
+## Scaling model
+
+Single-node stateful: one process, one SQLite file. `UNIQUE` constraints (email, token hashes) keep
+the data correct under concurrent requests within that process; two processes against the same
+file is not the supported or tested deployment model.
+
+## Observability
+
+Accepts an inbound `X-Request-Id` unconditionally and logs it via Fastify's default request
+logging. Does not parse or forward `traceparent`. The security events this service forwards to
+audit do not yet carry a request id of their own — only auth's own log line for the causing request
+does.
+
+## Backup / restore
+
+Back up the database and the JWT signing key files together; restoring the database with a
+different signing key invalidates every outstanding access token immediately.
+
+See [docs/READINESS.md](docs/READINESS.md) for the full contract.
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
