@@ -3,7 +3,6 @@ import { readFileSync } from 'node:fs';
 import { isIP } from 'node:net';
 import rateLimit from '@fastify/rate-limit';
 import Fastify from 'fastify';
-import { AuditClient } from '@atc-web/service-core/audit';
 import { registerProbes } from '@atc-web/service-core/fastify';
 import { AuthError } from '../domain/errors.js';
 import { ApiKeyAuth } from './api-key-auth.js';
@@ -50,11 +49,9 @@ export class AuthApi {
    * @param {import('../store/session-store.js').SessionStore} deps.sessions
    * @param {import('../store/event-store.js').EventStore} deps.events
    * @param {import('../types.js').Logger} [deps.logger]
-   * @param {import('@atc-web/service-core/audit').AuditClient} [deps.audit]
    */
-  constructor({ config, audit, service, jwt, db, mailer, users, sessions, events, logger }) {
+  constructor({ config, service, jwt, db, mailer, users, sessions, events, logger }) {
     this.config = config;
-    this.audit = audit;
     this.service = service;
     this.jwt = jwt;
     this.db = db;
@@ -80,8 +77,9 @@ export class AuthApi {
       ajv: { customOptions: { removeAdditional: false, coerceTypes: false } },
     });
     app.decorateRequest('apiKeyId', '');
+    app.decorateRequest('apiKeyRole', undefined);
+    app.decorateRequest('apiKeyScopes', null);
     app.setErrorHandler(this.#errorHandler);
-    app.addHook('onSend', AuditClient.hook(this.audit));
     app.setNotFoundHandler((_request, reply) => {
       reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'route not found' } });
     });
@@ -116,13 +114,16 @@ export class AuthApi {
   };
 
   /**
-   * Audit context: the calling backend forwards the end user's address, falling back to the socket peer.
+   * Audit context: a calling backend holding a `proxy`-flagged key may forward the end user's
+   * address via `X-Client-IP`; every other key gets the socket peer address regardless of what it
+   * sends in that header (Stage 4 — see `ApiKeyAuth.isProxyTrusted`).
    * @param {FastifyRequest} request
    * @returns {Ctx}
    */
   static ctx(request) {
     const forwarded = request.headers['x-client-ip'];
-    const ip = typeof forwarded === 'string' && isIP(forwarded.trim()) ? forwarded.trim() : request.ip;
+    const trusted = ApiKeyAuth.isProxyTrusted(request);
+    const ip = trusted && typeof forwarded === 'string' && isIP(forwarded.trim()) ? forwarded.trim() : request.ip;
     const ua = request.headers['x-client-user-agent'] ?? request.headers['user-agent'];
     return { ip: ip || null, userAgent: typeof ua === 'string' ? ua.slice(0, 512) : null };
   }
@@ -152,7 +153,7 @@ export class AuthApi {
     const ctx = AuthApi.ctx;
 
     // ---- users (administration by the calling backend)
-    api.post('/users', { schema: { body: Schemas.register } }, async (request, reply) => {
+    api.post('/users', { schema: { body: Schemas.register }, preHandler: ApiKeyAuth.require('write') }, async (request, reply) => {
       const body = /** @type {{ email: string, password: string, name?: string|null }} */ (request.body);
       const { user, verificationEmailSent } = await s.register(body, ctx(request));
       reply.header('location', `/v1/users/${user.id}`);
@@ -178,12 +179,12 @@ export class AuthApi {
       return { user: Views.user(u) };
     });
 
-    api.patch('/users/:id', { schema: { params: Schemas.idParams, body: Schemas.patchUser } }, async (request) => {
+    api.patch('/users/:id', { schema: { params: Schemas.idParams, body: Schemas.patchUser }, preHandler: ApiKeyAuth.require('write') }, async (request) => {
       const { id } = /** @type {{ id: string }} */ (request.params);
       return { user: Views.user(s.updateUser(id, /** @type {any} */ (request.body), ctx(request))) };
     });
 
-    api.delete('/users/:id', { schema: { params: Schemas.idParams } }, async (request, reply) => {
+    api.delete('/users/:id', { schema: { params: Schemas.idParams }, preHandler: ApiKeyAuth.require('write') }, async (request, reply) => {
       s.deleteUser(/** @type {{ id: string }} */ (request.params).id, ctx(request));
       return reply.code(204).send();
     });

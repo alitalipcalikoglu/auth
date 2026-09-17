@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 import { AuthApi } from '../src/http/auth-api.js';
-import { API_KEY, ctx, GOOD_PASSWORD, OTHER_KEY, silentLog, testAuthService } from './helpers.js';
+import { API_KEY, ctx, GOOD_PASSWORD, OTHER_KEY, READ_KEY, silentLog, testAuthService } from './helpers.js';
 
 /** @type {Awaited<ReturnType<typeof testAuthService>>} */
 let t;
@@ -162,4 +162,48 @@ test('lockout returns 423 with Retry-After; metrics and user paging work', async
 
   const other = await app.inject({ url: '/v1/users', headers: { authorization: `Bearer ${OTHER_KEY}` } });
   assert.equal(other.statusCode, 200, 'second key works');
+});
+
+test('Stage 4: a key without the proxy flag cannot spoof X-Client-IP -- request.ip is used instead', async () => {
+  const email = `proxytest-${Date.now()}@example.com`;
+  let res = await call('POST', '/v1/users', { email, password: GOOD_PASSWORD }, {}); // "test" key: proxy-trusted
+  const user = res.json().user;
+  res = await call('POST', '/v1/auth/login', { email, password: GOOD_PASSWORD });
+  const tokens = res.json().tokens;
+
+  // Same X-Client-IP header, but presented with the non-proxy "other" key instead.
+  res = await app.inject({
+    method: 'POST', url: '/v1/auth/logout', payload: { refreshToken: tokens.refreshToken },
+    headers: { authorization: `Bearer ${OTHER_KEY}`, 'x-client-ip': '198.51.100.7' },
+  });
+  assert.equal(res.statusCode, 204);
+
+  res = await call('POST', '/v1/auth/login', { email, password: GOOD_PASSWORD }); // fresh session via the trusted "test" key
+  const live = res.json().tokens;
+  res = await app.inject({
+    method: 'POST', url: '/v1/auth/refresh', payload: { refreshToken: live.refreshToken },
+    headers: { authorization: `Bearer ${OTHER_KEY}`, 'x-client-ip': '198.51.100.7' }, // non-proxy key, same spoof attempt
+  });
+  assert.equal(res.statusCode, 200);
+  const events = await call('GET', `/v1/users/${user.id}/events?limit=1`);
+  assert.notEqual(events.json().items[0].ip, '198.51.100.7', 'the non-proxy key\'s X-Client-IP was not trusted');
+  assert.equal(events.json().items[0].ip, '127.0.0.1', 'the socket peer address was used instead');
+});
+
+test('Stage 4: a read-only key cannot register, update or delete a user, but can still read', async () => {
+  const readAuth = { authorization: `Bearer ${READ_KEY}` };
+  let res = await app.inject({ method: 'POST', url: '/v1/users', payload: { email: `reader-${Date.now()}@example.com`, password: GOOD_PASSWORD }, headers: readAuth });
+  assert.equal(res.statusCode, 403);
+  assert.equal(res.json().error.code, 'FORBIDDEN');
+
+  res = await call('POST', '/v1/users', { email: `writer-${Date.now()}@example.com`, password: GOOD_PASSWORD }); // create with the readwrite key
+  const user = res.json().user;
+
+  res = await app.inject({ method: 'PATCH', url: `/v1/users/${user.id}`, payload: { name: 'Blocked' }, headers: readAuth });
+  assert.equal(res.statusCode, 403);
+  res = await app.inject({ method: 'DELETE', url: `/v1/users/${user.id}`, headers: readAuth });
+  assert.equal(res.statusCode, 403);
+
+  res = await app.inject({ method: 'GET', url: `/v1/users/${user.id}`, headers: readAuth });
+  assert.equal(res.statusCode, 200, 'reading is still allowed');
 });

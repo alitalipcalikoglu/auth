@@ -1,11 +1,10 @@
-// Type-only augmentation for the `apiKeyId` request decorator set in auth.js. No runtime code.
+// Type-only augmentation for the request decorators set in api-key-auth.js. No runtime code.
 import 'fastify';
 
 declare module 'fastify' {
   interface FastifyRequest {
     apiKeyId: string;
-  }
-  interface FastifyContextConfig {
-    audit?: import('@atc-web/service-core/audit').AuditRouteConfig;
+    apiKeyRole: string | undefined;
+    apiKeyScopes: string[] | null;
   }
 }

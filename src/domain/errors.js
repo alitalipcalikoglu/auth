@@ -10,6 +10,7 @@ export class AuthError extends Error {
     ACCOUNT_LOCKED: 423,
     ACCOUNT_DISABLED: 403,
     EMAIL_NOT_VERIFIED: 403,
+    FORBIDDEN: 403,
     INVALID_TOKEN: 401,
     TOKEN_REUSED: 401,
     USER_NOT_FOUND: 404,

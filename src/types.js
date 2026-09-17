@@ -6,6 +6,8 @@
  * @typedef {object} ApiKey
  * @property {string} id
  * @property {string} secret
+ * @property {string} [role]      `read`, `write`, or `readwrite` (default when omitted).
+ * @property {string[]|null} [scopes]  `null` (no `:proxy` given) or `['proxy']`.
  */
 
 /**
@@ -44,6 +46,7 @@
  * @property {string} verifyUrlTemplate     Contains `{token}`.
  * @property {string} resetUrlTemplate      Contains `{token}`.
  * @property {number} eventRetentionDays
+ * @property {number} auditOutboxRetentionDays  Sent outbox rows older than this are purged.
  */
 
 /** @typedef {import('./config.js').Config} Config */

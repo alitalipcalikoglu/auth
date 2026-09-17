@@ -2,9 +2,11 @@ import { generateKeyPairSync } from 'node:crypto';
 import { Config } from '../src/config.js';
 import { JwtSigner } from '../src/crypto/jwt.js';
 import { Database } from '../src/db.js';
+import { AuditEvents } from '../src/domain/audit-events.js';
 
 export const API_KEY = 'k'.repeat(40);
 export const OTHER_KEY = 'o'.repeat(40);
+export const READ_KEY = 'r'.repeat(40);
 
 /** Fresh ES256 key pair as PEM strings. */
 export function testKeyPair() {
@@ -18,7 +20,10 @@ export function testKeyPair() {
 /** Full valid environment; tests override single values. */
 export function fullEnv() {
   return {
-    AUTH_API_KEYS: `test:${API_KEY},other:${OTHER_KEY}`,
+    // "test" is readwrite + proxy-trusted (most tests forward X-Client-IP through it); "other" is
+    // plain (no role, no proxy) so it doubles as the "cannot spoof IP" negative-test key; "reader"
+    // is read-only, for the "cannot register" negative test.
+    AUTH_API_KEYS: `test:${API_KEY}:readwrite:proxy,other:${OTHER_KEY},reader:${READ_KEY}:read`,
     JWT_PRIVATE_KEY_PATH: '/keys/jwt-private.pem',
     JWT_ISSUER: 'https://auth.test.local',
     JWT_AUDIENCE: 'test-app',
@@ -115,7 +120,7 @@ export async function testAuthService(envOverrides = {}) {
   const users = new UserStore(db);
   const sessions = new SessionStore(db);
   const tokens = new ActionTokenStore(db);
-  const events = new EventStore(db);
+  const events = new EventStore(db, AuditEvents.fromSecurityEvent);
   const service = new AuthService({
     db, users, sessions, tokens, events,
     hasher: new PasswordHasher({ logN: config.scryptLogN }),

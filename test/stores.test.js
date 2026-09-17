@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { OpaqueToken } from '../src/crypto/opaque-token.js';
+import { AuditEvents } from '../src/domain/audit-events.js';
 import { ActionTokenStore } from '../src/store/action-token-store.js';
 import { EventStore } from '../src/store/event-store.js';
 import { SessionStore } from '../src/store/session-store.js';
@@ -96,7 +97,7 @@ test('ActionTokenStore issues single-use tokens and invalidates earlier ones', (
 
 test('EventStore records and pages events', () => {
   const db = testDb();
-  const events = new EventStore(db);
+  const events = new EventStore(db, AuditEvents.fromSecurityEvent);
   for (let i = 0; i < 5; i++) events.record({ userId: 'u', type: `t${i}`, meta: { i } }, i);
   events.record({ type: 'anon' }, 9);
   const page = events.forUser('u', { limit: 2 });

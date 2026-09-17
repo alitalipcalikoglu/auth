@@ -43,6 +43,7 @@ export class Config {
     this.verifyUrlTemplate = v.verifyUrlTemplate;
     this.resetUrlTemplate = v.resetUrlTemplate;
     this.eventRetentionDays = v.eventRetentionDays;
+    this.auditOutboxRetentionDays = v.auditOutboxRetentionDays;
     Object.freeze(this);
   }
 
@@ -102,6 +103,7 @@ export class Config {
       verifyUrlTemplate: Config.#urlTemplate(r.required('VERIFY_URL_TEMPLATE'), 'VERIFY_URL_TEMPLATE'),
       resetUrlTemplate: Config.#urlTemplate(r.required('RESET_URL_TEMPLATE'), 'RESET_URL_TEMPLATE'),
       eventRetentionDays: r.integer('EVENT_RETENTION_DAYS', 90, { min: 1 }),
+      auditOutboxRetentionDays: r.integer('AUDIT_OUTBOX_RETENTION_DAYS', 7, { min: 1 }),
     });
   }
 
@@ -115,12 +117,21 @@ export class Config {
     return value;
   }
 
+  /** Roles a key may hold. Missing role defaults to `readwrite` — every key issued before Stage 4
+   * (plain `id:secret`) keeps working exactly as before. */
+  static ROLES = ['read', 'write', 'readwrite'];
+
   /**
-   * Parse `id:secret,id2:secret2`.
+   * Parse `id:secret[:role[:proxy]]`. `proxy` is the only valid flag today (a 4th field is a
+   * `+`-joined list for consistency with every other service, but this service has exactly one
+   * flag) — a key without it is not trusted to set `X-Client-IP`, see `ApiKeyAuth.isProxyTrusted`.
    * @param {string} raw
    * @returns {ApiKey[]}
    */
   static #parseApiKeys(raw) {
-    return parseApiKeys(raw, 'AUTH_API_KEYS', { minSecretLength: Config.MIN_SECRET_LENGTH });
+    return parseApiKeys(raw, 'AUTH_API_KEYS', {
+      roles: Config.ROLES, minSecretLength: Config.MIN_SECRET_LENGTH,
+      scopeValidate: (s) => s === 'proxy', scopeNoun: 'flag',
+    });
   }
 }

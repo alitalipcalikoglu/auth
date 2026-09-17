@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { AuditEvents } from '../src/domain/audit-events.js';
 import { Maintenance } from '../src/maintenance.js';
 import { ActionTokenStore } from '../src/store/action-token-store.js';
 import { EventStore } from '../src/store/event-store.js';
@@ -12,7 +13,7 @@ test('Maintenance purges expired sessions, spent tokens and old events', () => {
   const users = new UserStore(db);
   const sessions = new SessionStore(db);
   const tokens = new ActionTokenStore(db);
-  const events = new EventStore(db);
+  const events = new EventStore(db, AuditEvents.fromSecurityEvent);
   const u = users.create({ email: 'a@b.co', passwordHash: 'h' });
   const day = 86_400_000;
   const now = 100 * day;

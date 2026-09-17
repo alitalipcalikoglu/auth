@@ -20,8 +20,12 @@ MFA/WebAuthn/OIDC federation, authorization/roles (callers own that).
 
 SQLite (`DB_PATH`): `users` (email `UNIQUE`), `sessions` (refresh-token hash `UNIQUE`, previous-hash
 `UNIQUE` for rotation), `action_tokens` (verify/reset, hashed, single-use), `events` (per-user
-security log, append-only within this service; not the same table as the central `audit` service).
-Standard migration mechanism (`user_version`, WAL).
+security log, append-only within this service; not the same table as the central `audit` service),
+`outbox` (Stage 4: `id`/`at`/`payload`/`sent_at` — every row `EventStore.record()` writes into
+`events` gets a matching row here, in the same transaction; a background loop drains it to the audit
+service, see "Audit events" in README.md). Standard migration mechanism (`user_version`, WAL); v2
+(the `outbox` table) is this service's first real schema migration since the Stage 3 mechanism was
+built, applied automatically on first start against a v1 database.
 
 ## Health endpoint
 
@@ -34,9 +38,11 @@ Standard migration mechanism (`user_version`, WAL).
 
 ## Graceful shutdown
 
-SIGTERM/SIGINT → stop the hourly maintenance purge → `app.close()` → flush the audit forwarder
-(buffered, up to ~2 s plus retries) → close the database → exit. Force-exit 30 s; PM2
-`kill_timeout` 35 000 ms.
+SIGTERM/SIGINT → stop the hourly maintenance purge → `app.close()` → stop the outbox drain loop and
+attempt one last drain → close the database → exit. Unlike a buffered forwarder, a drain that fails
+or times out here loses nothing — every undelivered event is already durable in `outbox` and is
+picked up again by the next process's drain loop on start. Force-exit 30 s; PM2 `kill_timeout`
+35 000 ms.
 
 ## Resource limits
 
@@ -51,8 +57,12 @@ attempt, see below).
 ## Retry policy
 
 None for the notify call (one attempt; failure degrades gracefully as described above, it is not
-retried within the request). The audit-forwarding buffer retries up to 6 times with backoff to
-30 s, same as every service using the shared `net/audit-client.js`.
+retried within the request). The audit-forwarding outbox drain retries a batch up to 6 times with
+backoff to 30 s per drain tick (same `AuditClient` retry policy every service uses), and — unlike a
+buffered forwarder — an undelivered row is retried again on every future tick and every future
+process start until it is acknowledged, not just within one drain attempt. Delivery is
+at-least-once: a crash between a successful response and marking the row sent resends it, with the
+same id, next tick; the audit service's `UNIQUE(source, client_id)` makes that resend a no-op there.
 
 ## Idempotency
 
@@ -67,7 +77,10 @@ conditional `UPDATE ... WHERE used_at IS NULL`.
 ## Backup
 
 Users, sessions (for controlled revocation on restore — an old backup's sessions are still valid
-tokens until their natural expiry) and the per-user event history.
+tokens until their natural expiry), the per-user event history, and `outbox` (an in-flight backup
+can catch undelivered rows mid-flight; restoring them just means they get (re-)delivered after
+restore, which is safe — see "Audit events" in README.md for why a resend is a no-op on the audit
+side).
 
 ## Restore
 
@@ -107,10 +120,16 @@ single-use, issuing a new one invalidates earlier ones of the same purpose. Acco
 `LOGIN_MAX_FAILURES` (default 10) within `LOGIN_LOCKOUT_MIN` (default 15). JWT: ES256, `kid` from
 the key's own RFC 7638 thumbprint; `JWT_PREVIOUS_PUBLIC_KEY_PATH` lets a rotated signing key's
 tokens keep verifying during the overlap window while new tokens are signed with the current key.
-API keys (`id:secret`, no roles — any key can do everything this service exposes) compared in
-constant time. `X-Client-IP` (used for the IP recorded against a session/event) is trusted from any
-API-key holder without a `TRUST_PROXY`-style gate of its own — any caller that has a valid key can
-assert an arbitrary client IP.
+API keys (`id:secret[:role[:proxy]]`) compared in constant time. Stage 4 narrowed two things that
+were previously unconditional for any valid key: a `role` (`read`/`write`/`readwrite`, default
+`readwrite`) gates only `POST /v1/users`, `PATCH /v1/users/:id` and `DELETE /v1/users/:id` — every
+other route needs no particular role, since it proxies an end user's own action rather than being
+back-office administration; and `X-Client-IP` is now trusted only from a key carrying the `proxy`
+flag (`ApiKeyAuth.isProxyTrusted`) — every other key gets the socket's own peer address regardless
+of what it sends in that header, closing the "any caller with a valid key can assert an arbitrary
+client IP" gap this section used to document as a known limitation. A key deployed before Stage 4
+(plain `id:secret`) keeps its full `readwrite` access unchanged, but does *not* gain `proxy` trust
+automatically — see README.md's upgrade note.
 
 ## Scaling model
 

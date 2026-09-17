@@ -7,7 +7,7 @@ AUDIT_URL=http://10.0.0.5:3005
 AUDIT_API_KEY=<the auth key from AUDIT_API_KEYS, role write>
 ```
 
-Every event stored in the per-user security log (`GET /v1/users/:id/events`) is forwarded as it is recorded, so the audit service holds the same history across every service with one hash chain. The key id becomes the event `source`. Events are buffered in memory, flushed every 2 seconds in batches, retried with backoff and idempotent ids; a request is never slowed down or failed by auditing.
+Every event stored in the per-user security log (`GET /v1/users/:id/events`) is durably queued for forwarding in the same database transaction as the change it describes (see "Audit events" in README.md for the transactional-outbox durability contract), so the audit service ends up with the same history across every service, in one hash chain. The key id becomes the event `source`. A background loop drains the queue every 2 seconds in batches, retried with backoff and stable, idempotent ids; a request is never slowed down or failed by auditing, and a crash before delivery never loses the event — it is retried on the next drain or the next process start.
 
 ## Actions
 

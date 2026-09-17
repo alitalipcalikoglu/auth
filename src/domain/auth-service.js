@@ -94,8 +94,12 @@ export class AuthService {
     if (this.users.byEmail(email)) throw new AuthError('EMAIL_TAKEN', 'an account with this email already exists');
     const passwordHash = await this.hasher.hash(input.password);
     if (this.users.byEmail(email)) throw new AuthError('EMAIL_TAKEN', 'an account with this email already exists'); // raced during hashing
-    const user = this.users.create({ email, name: input.name ?? null, passwordHash }, this.now());
-    this.events.record({ userId: user.id, type: 'user.registered', ip: ctx.ip }, this.now());
+    const now = this.now();
+    const user = this.db.transaction(() => {
+      const u = this.users.create({ email, name: input.name ?? null, passwordHash }, now);
+      this.events.record({ userId: u.id, type: 'user.registered', ip: ctx.ip }, now);
+      return u;
+    });
     const verificationEmailSent = await this.#sendVerification(user);
     return { user, verificationEmailSent };
   }
@@ -106,11 +110,15 @@ export class AuthService {
    * @returns {UserRow}
    */
   verifyEmail(token, ctx) {
-    const row = this.tokens.consume(token, 'verify_email', this.now());
-    if (!row) throw new AuthError('INVALID_TOKEN', 'verification link is invalid or expired');
-    this.users.markVerified(row.user_id, this.now());
-    this.events.record({ userId: row.user_id, type: 'email.verified', ip: ctx.ip }, this.now());
-    return this.#requireUser(row.user_id);
+    const now = this.now();
+    const userId = this.db.transaction(() => {
+      const row = this.tokens.consume(token, 'verify_email', now);
+      if (!row) throw new AuthError('INVALID_TOKEN', 'verification link is invalid or expired');
+      this.users.markVerified(row.user_id, now);
+      this.events.record({ userId: row.user_id, type: 'email.verified', ip: ctx.ip }, now);
+      return row.user_id;
+    });
+    return this.#requireUser(userId);
   }
 
   /**
@@ -150,9 +158,11 @@ export class AuthService {
       throw new AuthError('ACCOUNT_LOCKED', 'too many failed attempts, try again later', { retryAfterSec: Math.ceil((user.locked_until - now) / 1000) });
     }
     if (!ok) {
-      const r = this.users.recordLoginFailure(user.id, { maxFailures: this.options.loginMaxFailures, lockoutMs: this.options.lockoutMs, now });
-      this.events.record({ userId: user.id, type: 'login.failed', ip: ctx.ip, meta: { reason: 'bad_password', failures: r.failed_logins } }, now);
-      if (r.locked_until) this.events.record({ userId: user.id, type: 'account.locked', ip: ctx.ip }, now);
+      this.db.transaction(() => {
+        const r = this.users.recordLoginFailure(user.id, { maxFailures: this.options.loginMaxFailures, lockoutMs: this.options.lockoutMs, now });
+        this.events.record({ userId: user.id, type: 'login.failed', ip: ctx.ip, meta: { reason: 'bad_password', failures: r.failed_logins } }, now);
+        if (r.locked_until) this.events.record({ userId: user.id, type: 'account.locked', ip: ctx.ip }, now);
+      });
       throw new AuthError('INVALID_CREDENTIALS', 'email or password is incorrect');
     }
     if (user.status === 'disabled') {
@@ -163,12 +173,17 @@ export class AuthService {
       this.events.record({ userId: user.id, type: 'login.failed', ip: ctx.ip, meta: { reason: 'unverified' } }, now);
       throw new AuthError('EMAIL_NOT_VERIFIED', 'verify your email before signing in');
     }
-    this.users.recordLoginSuccess(user.id, now);
-    if (this.hasher.needsRehash(user.password_hash)) {
-      this.users.setPassword(user.id, await this.hasher.hash(input.password), now);
-    }
-    const { session, refreshToken } = this.sessions.create({ userId: user.id, ttlMs: this.options.refreshTtlMs, ip: ctx.ip, userAgent: ctx.userAgent }, now);
-    this.events.record({ userId: user.id, type: 'login.succeeded', ip: ctx.ip, meta: { sessionId: session.id } }, now);
+    // The rehash (needs the async hasher) happens before the transaction; everything else that
+    // must commit together as one unit — success accounting, the new session, its audit event — is
+    // synchronous and goes inside it.
+    const rehash = this.hasher.needsRehash(user.password_hash) ? await this.hasher.hash(input.password) : null;
+    const { session, refreshToken } = this.db.transaction(() => {
+      this.users.recordLoginSuccess(user.id, now);
+      if (rehash) this.users.setPassword(user.id, rehash, now);
+      const created = this.sessions.create({ userId: user.id, ttlMs: this.options.refreshTtlMs, ip: ctx.ip, userAgent: ctx.userAgent }, now);
+      this.events.record({ userId: user.id, type: 'login.succeeded', ip: ctx.ip, meta: { sessionId: created.session.id } }, now);
+      return created;
+    });
     const fresh = this.#requireUser(user.id);
     return { user: fresh, tokens: await this.#tokenPair(fresh, session, refreshToken) };
   }
@@ -186,8 +201,10 @@ export class AuthService {
     const { session, current } = found;
     if (session.revoked_at !== null) throw new AuthError('INVALID_TOKEN', 'session has been revoked');
     if (!current) {
-      this.sessions.revoke(session.id, now);
-      this.events.record({ userId: session.user_id, type: 'session.reuse_detected', ip: ctx.ip, meta: { sessionId: session.id } }, now);
+      this.db.transaction(() => {
+        this.sessions.revoke(session.id, now);
+        this.events.record({ userId: session.user_id, type: 'session.reuse_detected', ip: ctx.ip, meta: { sessionId: session.id } }, now);
+      });
       this.log.warn({ userId: session.user_id, sessionId: session.id, ip: ctx.ip }, 'refresh token reuse detected, session revoked');
       throw new AuthError('TOKEN_REUSED', 'refresh token was already used; session revoked');
     }
@@ -200,9 +217,12 @@ export class AuthService {
       this.sessions.revoke(session.id, now);
       throw new AuthError('ACCOUNT_DISABLED', 'account is disabled');
     }
-    const nextRefresh = this.sessions.rotate(session.id, { ip: ctx.ip, userAgent: ctx.userAgent, now });
-    const updated = /** @type {SessionRow} */ (this.sessions.byId(session.id));
-    this.events.record({ userId: user.id, type: 'session.refreshed', ip: ctx.ip, meta: { sessionId: session.id } }, now);
+    const { nextRefresh, updated } = this.db.transaction(() => {
+      const refreshed = this.sessions.rotate(session.id, { ip: ctx.ip, userAgent: ctx.userAgent, now });
+      const row = /** @type {SessionRow} */ (this.sessions.byId(session.id));
+      this.events.record({ userId: user.id, type: 'session.refreshed', ip: ctx.ip, meta: { sessionId: session.id } }, now);
+      return { nextRefresh: refreshed, updated: row };
+    });
     return { user, tokens: await this.#tokenPair(user, updated, nextRefresh) };
   }
 
@@ -214,9 +234,12 @@ export class AuthService {
   logout(refreshToken, ctx) {
     const found = this.sessions.findByToken(refreshToken);
     if (!found) return;
-    if (this.sessions.revoke(found.session.id, this.now())) {
-      this.events.record({ userId: found.session.user_id, type: 'logout', ip: ctx.ip, meta: { sessionId: found.session.id } }, this.now());
-    }
+    const now = this.now();
+    this.db.transaction(() => {
+      if (this.sessions.revoke(found.session.id, now)) {
+        this.events.record({ userId: found.session.user_id, type: 'logout', ip: ctx.ip, meta: { sessionId: found.session.id } }, now);
+      }
+    });
   }
 
   /**
@@ -255,9 +278,12 @@ export class AuthService {
   revokeSession(userId, sessionId, ctx) {
     const s = this.sessions.byId(sessionId);
     if (!s || s.user_id !== userId) throw new AuthError('SESSION_NOT_FOUND', 'session not found');
-    if (this.sessions.revoke(sessionId, this.now())) {
-      this.events.record({ userId, type: 'session.revoked', ip: ctx.ip, meta: { sessionId } }, this.now());
-    }
+    const now = this.now();
+    this.db.transaction(() => {
+      if (this.sessions.revoke(sessionId, now)) {
+        this.events.record({ userId, type: 'session.revoked', ip: ctx.ip, meta: { sessionId } }, now);
+      }
+    });
   }
 
   /**
@@ -267,9 +293,12 @@ export class AuthService {
    */
   revokeAllSessions(userId, ctx) {
     this.#requireUser(userId);
-    const n = this.sessions.revokeAllForUser(userId, this.now());
-    this.events.record({ userId, type: 'sessions.revoked_all', ip: ctx.ip, meta: { count: n } }, this.now());
-    return n;
+    const now = this.now();
+    return this.db.transaction(() => {
+      const n = this.sessions.revokeAllForUser(userId, now);
+      this.events.record({ userId, type: 'sessions.revoked_all', ip: ctx.ip, meta: { count: n } }, now);
+      return n;
+    });
   }
 
   // ---------------------------------------------------------------- passwords
@@ -284,8 +313,11 @@ export class AuthService {
     if (!user || user.status === 'disabled') return;
     this.#assertResendAllowed(user.id, 'reset_password');
     const now = this.now();
-    const token = this.tokens.issue({ userId: user.id, purpose: 'reset_password', ttlMs: this.options.resetTtlMs }, now);
-    this.events.record({ userId: user.id, type: 'password.reset_requested', ip: ctx.ip }, now);
+    const token = this.db.transaction(() => {
+      const t = this.tokens.issue({ userId: user.id, purpose: 'reset_password', ttlMs: this.options.resetTtlMs }, now);
+      this.events.record({ userId: user.id, type: 'password.reset_requested', ip: ctx.ip }, now);
+      return t;
+    });
     try {
       await this.mailer.sendPasswordReset({
         to: user.email, name: user.name, url: this.options.resetUrlTemplate.replace('{token}', encodeURIComponent(token)),

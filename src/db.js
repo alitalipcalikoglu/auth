@@ -55,5 +55,22 @@ export class Database extends CoreDatabase {
     CREATE INDEX events_user ON events (user_id, at DESC);
     CREATE INDEX events_at ON events (at);
     `,
+    `
+    -- Transactional outbox (Stage 4): EventStore.record() inserts a row here in the same SQLite
+    -- transaction as the security event it describes and whatever business mutation caused it, so
+    -- the event can never be forwarded to the audit service before that transaction commits, and
+    -- never exists here at all if it rolls back. "id" is a stable UUID generated once at insert and
+    -- reused on every delivery attempt — audit's UNIQUE(source, client_id) makes a resend (e.g.
+    -- after a crash between a successful send and "sent_at" being set) a safe no-op there, not a
+    -- second record. See AuditClient's outbox mode (@atc-web/service-core/audit).
+    CREATE TABLE outbox (
+      id       TEXT PRIMARY KEY,
+      at       INTEGER NOT NULL,
+      payload  TEXT NOT NULL,
+      sent_at  INTEGER
+    );
+    CREATE INDEX outbox_pending ON outbox (at) WHERE sent_at IS NULL;
+    CREATE INDEX outbox_sent ON outbox (sent_at) WHERE sent_at IS NOT NULL;
+    `,
   ];
 }

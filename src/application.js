@@ -23,13 +23,22 @@ export class Application {
   /** @param {Config} config */
   constructor(config) {
     this.config = config;
-    this.audit = new AuditClient({ target: config.audit });
     this.db = new Database(config.dbPath, { backupDir: config.dbBackupDir });
     this.users = new UserStore(this.db);
     this.sessions = new SessionStore(this.db);
     this.tokens = new ActionTokenStore(this.db);
-    this.events = new EventStore(this.db);
-    this.events.onRecord = (e, at) => { this.audit.record(AuditEvents.fromSecurityEvent(e, at)); };
+    this.events = new EventStore(this.db, AuditEvents.fromSecurityEvent);
+    // Outbox mode, not buffered: a security event must survive a crash between the business
+    // mutation that caused it and the network call that reports it — see EventStore.record and
+    // docs/READINESS.md's Persistence section for why every other service stays buffered.
+    this.audit = new AuditClient({
+      target: config.audit,
+      outbox: {
+        pending: (limit) => this.events.outboxPending(limit),
+        markSent: (ids) => this.events.outboxMarkSent(ids),
+        purge: () => this.events.outboxPurge(config.auditOutboxRetentionDays),
+      },
+    });
     this.jwt = JwtSigner.fromFiles({
       privateKeyPath: config.jwtPrivateKeyPath,
       previousPublicKeyPath: config.jwtPreviousPublicKeyPath,
@@ -79,7 +88,7 @@ export class Application {
         resetUrlTemplate: config.resetUrlTemplate,
       },
     });
-    const api = new AuthApi({ config, audit: this.audit, service, jwt: this.jwt, db: this.db, mailer: this.mailer, users: this.users, sessions: this.sessions, events: this.events });
+    const api = new AuthApi({ config, service, jwt: this.jwt, db: this.db, mailer: this.mailer, users: this.users, sessions: this.sessions, events: this.events });
     const app = await api.build();
     this.app = app;
     service.log = app.log.child({ component: 'auth' });
