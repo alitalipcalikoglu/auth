@@ -130,6 +130,10 @@ Class-based; dependencies are injected through constructors, `src/application.js
 - Multi-tenant user pools: one deployment serves one user pool. Run another instance for another product.
 - Multiple processes on one SQLite file: intended deployment is one instance per database.
 
+## Audit events
+
+With `AUDIT_URL` and `AUDIT_API_KEY` set, every security event this service records per user (registration, verification, login success and failure with the reason, lockout, refresh, logout, session revocation, password reset and change, account disable/enable/delete) is also forwarded to the audit service as `auth.<event type>` with the user as actor and target, the client IP and the event's metadata. Attempts that did not succeed carry `outcome: "failure"`. Forwarding is buffered and never slows down or fails a request. Details: [examples/audit-events.md](examples/audit-events.md).
+
 ## License
 
 MIT, see [LICENSE](LICENSE).

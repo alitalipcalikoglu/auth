@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { isIP } from 'node:net';
 import rateLimit from '@fastify/rate-limit';
 import Fastify from 'fastify';
+import { AuditClient } from '../net/audit-client.js';
 import { AuthError } from '../domain/errors.js';
 import { ApiKeyAuth } from './api-key-auth.js';
 import { Schemas } from './schemas.js';
@@ -48,9 +49,11 @@ export class AuthApi {
    * @param {import('../store/session-store.js').SessionStore} deps.sessions
    * @param {import('../store/event-store.js').EventStore} deps.events
    * @param {import('../types.js').Logger} [deps.logger]
+   * @param {import('../net/audit-client.js').AuditClient} [deps.audit]
    */
-  constructor({ config, service, jwt, db, mailer, users, sessions, events, logger }) {
+  constructor({ config, audit, service, jwt, db, mailer, users, sessions, events, logger }) {
     this.config = config;
+    this.audit = audit;
     this.service = service;
     this.jwt = jwt;
     this.db = db;
@@ -78,6 +81,7 @@ export class AuthApi {
     });
     app.decorateRequest('apiKeyId', '');
     app.setErrorHandler(this.#errorHandler);
+    app.addHook('onSend', AuditClient.hook(this.audit));
     app.setNotFoundHandler((_request, reply) => {
       reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'route not found' } });
     });

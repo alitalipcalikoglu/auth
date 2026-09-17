@@ -1,4 +1,6 @@
 import { Config } from './config.js';
+import { AuditClient } from './net/audit-client.js';
+import { AuditEvents } from './domain/audit-events.js';
 import { JwtSigner } from './crypto/jwt.js';
 import { PasswordHasher } from './crypto/password.js';
 import { Database } from './db.js';
@@ -20,11 +22,13 @@ export class Application {
   /** @param {Config} config */
   constructor(config) {
     this.config = config;
+    this.audit = new AuditClient({ target: config.audit });
     this.db = new Database(config.dbPath);
     this.users = new UserStore(this.db);
     this.sessions = new SessionStore(this.db);
     this.tokens = new ActionTokenStore(this.db);
     this.events = new EventStore(this.db);
+    this.events.onRecord = (e, at) => { this.audit.record(AuditEvents.fromSecurityEvent(e, at)); };
     this.jwt = JwtSigner.fromFiles({
       privateKeyPath: config.jwtPrivateKeyPath,
       previousPublicKeyPath: config.jwtPreviousPublicKeyPath,
@@ -73,12 +77,14 @@ export class Application {
         resetUrlTemplate: config.resetUrlTemplate,
       },
     });
-    const api = new AuthApi({ config, service, jwt: this.jwt, db: this.db, mailer: this.mailer, users: this.users, sessions: this.sessions, events: this.events });
+    const api = new AuthApi({ config, audit: this.audit, service, jwt: this.jwt, db: this.db, mailer: this.mailer, users: this.users, sessions: this.sessions, events: this.events });
     const app = await api.build();
     this.app = app;
     service.log = app.log.child({ component: 'auth' });
     this.maintenance = new Maintenance({ sessions: this.sessions, tokens: this.tokens, events: this.events, log: app.log.child({ component: 'maintenance' }), options: { eventRetentionDays: config.eventRetentionDays } });
     this.#installSignalHandlers(app.log);
+    this.audit.logger = app.log;
+    this.audit.start();
     await app.listen({ port: config.port, host: config.host });
     app.log.info({ tls: config.tls !== null, kid: this.jwt.kid, issuer: config.jwtIssuer }, config.tls ? 'serving HTTPS' : 'serving plain HTTP, terminate TLS at a reverse proxy');
     this.maintenance.start();
@@ -98,6 +104,7 @@ export class Application {
     try {
       this.maintenance?.stop();
       await this.app?.close();
+      await this.audit.close();
       this.db.close();
       clearTimeout(forceExit);
       log.info('shutdown complete');

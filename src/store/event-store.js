@@ -7,6 +7,8 @@ export class EventStore {
 
   /** @param {Database} db */
   constructor(db) {
+    /** Called after every insert, e.g. to forward the event to the audit service. @type {((e: { userId: string|null, type: string, ip: string|null, meta: object|null }, at: number) => void)|null} */
+    this.onRecord = null;
     const C = EventStore.COLUMNS;
     this.stmt = {
       insert: db.prepare(`INSERT INTO events (user_id, type, ip, meta, at) VALUES (?, ?, ?, ?, ?)`),
@@ -21,6 +23,7 @@ export class EventStore {
    */
   record({ userId = null, type, ip = null, meta = null }, now = Date.now()) {
     this.stmt.insert.run(userId, type, ip, meta ? JSON.stringify(meta) : null, now);
+    this.onRecord?.({ userId, type, ip, meta }, now);
   }
 
   /**
