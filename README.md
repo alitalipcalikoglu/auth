@@ -147,7 +147,7 @@ With `AUDIT_URL` and `AUDIT_API_KEY` set, every security event this service reco
 
 ## Scaling model
 
-Single-node stateful: one process, one SQLite file. `UNIQUE` constraints (email, token hashes) keep
+**B — single-node stateful.** One process, one SQLite file. `UNIQUE` constraints (email, token hashes) keep
 the data correct under concurrent requests within that process; two processes against the same
 file is not the supported or tested deployment model.
 
