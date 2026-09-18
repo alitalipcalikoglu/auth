@@ -1,0 +1,1064 @@
+openapi: 3.1.0
+info:
+  title: auth
+  version: "1.0.0"
+  description: >-
+    User accounts, sessions and JWT-based authentication for the atc-web platform. Callers are
+    trusted application backends holding an API key (never an end user's browser directly); they
+    forward the end user's address and agent via `X-Client-IP` / `X-Client-User-Agent` for the
+    audit log when the presented key carries the `proxy` flag. Access tokens (ES256 JWTs) and
+    opaque refresh tokens are both returned in the JSON response body — this service never sets
+    cookies.
+
+tags:
+  - name: Users
+    description: Account administration by the calling backend.
+  - name: Sessions
+    description: Refresh-token sessions belonging to a user.
+  - name: Events
+    description: Per-user audit trail.
+  - name: Authentication
+    description: Login, refresh, logout, introspection.
+  - name: Email verification
+  - name: Password
+  - name: JWKS
+  - name: Operational
+
+security:
+  - ApiKeyAuth: []
+
+paths:
+  /health:
+    get:
+      operationId: auth.health.get
+      summary: Liveness probe
+      tags: [Operational]
+      security: []
+      x-stack-visibility: public
+      responses:
+        "200":
+          description: Process is up. No dependency check is performed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthResponse" }
+
+  /ready:
+    get:
+      operationId: auth.ready.get
+      summary: Readiness probe
+      description: >-
+        Pings the database and verifies the mail transport. The result is cached for 30 seconds
+        (`AuthApi.READY_CACHE_MS`).
+      tags: [Operational]
+      security: []
+      x-stack-visibility: public
+      responses:
+        "200":
+          description: Dependencies are reachable.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReadyResponse" }
+        "503":
+          description: A dependency check failed (cached for up to 30s).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReadyUnavailableResponse" }
+
+  /v1/info:
+    get:
+      operationId: auth.info.get
+      summary: Service and API contract identification
+      tags: [Operational]
+      security: []
+      x-stack-visibility: public
+      responses:
+        "200":
+          description: >-
+            Static service identity. `capabilities` is a fixed list for this service (no config
+            flag makes any entry instance-variable).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InfoResponse" }
+
+  /.well-known/jwks.json:
+    get:
+      operationId: auth.jwks.get
+      summary: JSON Web Key Set for access-token verification
+      description: >-
+        Public verification keys for the ES256 access tokens this service signs (current key plus,
+        during rotation, the previous key so live tokens keep verifying). Cacheable for 5 minutes.
+      tags: [JWKS]
+      security: []
+      x-stack-visibility: public
+      responses:
+        "200":
+          description: The current JWK Set.
+          headers:
+            cache-control:
+              schema: { type: string, example: "public, max-age=300" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JwksResponse" }
+
+  /metrics:
+    get:
+      operationId: auth.metrics.get
+      summary: Prometheus metrics
+      description: Authenticated (API key), but never subject to this service's own rate limiter.
+      tags: [Operational]
+      x-stack-visibility: operational
+      responses:
+        "200":
+          description: Prometheus text-exposition-format metrics.
+          content:
+            text/plain; version=0.0.4; charset=utf-8:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/users:
+    post:
+      operationId: auth.users.create
+      summary: Register a user
+      description: >-
+        Requires an API key with the `write` role (`write` or `readwrite`; `read`-only keys get
+        403 FORBIDDEN). Registration succeeds even when the verification email fails to send —
+        `verificationEmailSent` tells the caller whether to offer a resend.
+      tags: [Users]
+      x-stack-visibility: authenticated
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UserCreateRequest" }
+      responses:
+        "201":
+          description: User created.
+          headers:
+            location:
+              schema: { type: string, example: "/v1/users/8c9e2b7e-..." }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreateUserResponse" }
+        "400":
+          description: VALIDATION_FAILED (malformed body) or WEAK_PASSWORD (policy rejected).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: EMAIL_TAKEN — an account with this email already exists.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+              example: { error: { code: EMAIL_TAKEN, message: "an account with this email already exists" } }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+    get:
+      operationId: auth.users.list
+      summary: List or look up users
+      description: >-
+        Any valid API key may call this — there is no role gate on reads (confirmed: a
+        `read`-only key can enumerate every user, including by exact-email lookup). Pass `email`
+        for an exact-match lookup (returns 0 or 1 items, `nextCursor` always `null`); otherwise
+        paginates by keyset cursor, newest first.
+      tags: [Users]
+      x-stack-visibility: authenticated
+      parameters:
+        - name: email
+          in: query
+          schema: { $ref: "#/components/schemas/Email" }
+          description: Exact-match lookup; mutually exclusive in effect with pagination.
+        - name: limit
+          in: query
+          schema: { type: string, pattern: "^([1-9]|[1-9][0-9]|100)$" }
+          description: Page size, 1-100. Default 20.
+        - name: cursor
+          in: query
+          schema: { type: string, maxLength: 128 }
+          description: Opaque keyset cursor from a previous page's `nextCursor`.
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserListResponse" }
+        "400":
+          description: VALIDATION_FAILED (malformed query) or INVALID_CURSOR (undecodable cursor).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+              examples:
+                validation:
+                  value: { error: { code: VALIDATION_FAILED, message: "querystring/limit must match pattern \"^([1-9]|[1-9][0-9]|100)$\"", details: [] } }
+                invalidCursor:
+                  summary: "INVALID_CURSOR is a plain thrown object, not an AuthError instance — no `details` field (architectural inconsistency vs. every other domain error in this service, confirmed in source)."
+                  value: { error: { code: INVALID_CURSOR, message: "invalid cursor" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/users/{id}:
+    parameters:
+      - $ref: "#/components/parameters/UserId"
+    get:
+      operationId: auth.users.get
+      summary: Get a user by id
+      tags: [Users]
+      x-stack-visibility: authenticated
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserResponse" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/UserNotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+    patch:
+      operationId: auth.users.patch
+      summary: Update a user's name or status
+      description: >-
+        Requires an API key with the `write` role. Setting `status: "disabled"` revokes every
+        active session for the user as part of the same transaction.
+      tags: [Users]
+      x-stack-visibility: authenticated
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UserPatchRequest" }
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserResponse" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/UserNotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+    delete:
+      operationId: auth.users.delete
+      summary: Delete a user
+      description: Requires an API key with the `write` role.
+      tags: [Users]
+      x-stack-visibility: authenticated
+      responses:
+        "204": { description: User deleted. }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/UserNotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/users/{id}/sessions:
+    parameters:
+      - $ref: "#/components/parameters/UserId"
+    get:
+      operationId: auth.sessions.list
+      summary: List a user's active sessions
+      description: Sessions that are neither revoked nor expired, as of now.
+      tags: [Sessions]
+      x-stack-visibility: authenticated
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionListResponse" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/UserNotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+    delete:
+      operationId: auth.sessions.revokeAll
+      summary: Revoke every active session for a user
+      description: >-
+        Returns the count revoked. Note this endpoint returns `200` with a body, **not** `204` —
+        unlike the single-session revoke below, the handler sends a JSON object (confirmed in
+        source: no `reply.code(204)` on this route).
+      tags: [Sessions]
+      x-stack-visibility: authenticated
+      responses:
+        "200":
+          description: OK — sessions revoked.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RevokeAllResponse" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/UserNotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/users/{id}/sessions/{sid}:
+    parameters:
+      - $ref: "#/components/parameters/UserId"
+      - name: sid
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+        description: Session id.
+    delete:
+      operationId: auth.sessions.revokeOne
+      summary: Revoke a single session
+      description: >-
+        Idempotent create-then-delete semantics aside, a session that does not exist or does not
+        belong to `id` returns `SESSION_NOT_FOUND` — this route does not separately check whether
+        `id` itself refers to a real user first.
+      tags: [Sessions]
+      x-stack-visibility: authenticated
+      responses:
+        "204": { description: Session revoked (or already revoked). }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: SESSION_NOT_FOUND — no such session for this user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+              example: { error: { code: SESSION_NOT_FOUND, message: "session not found" } }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/users/{id}/events:
+    parameters:
+      - $ref: "#/components/parameters/UserId"
+    get:
+      operationId: auth.events.list
+      summary: List a user's audit events
+      description: >-
+        Keyset-paginated, newest first. Note the pagination field is `nextBefore`, not
+        `nextCursor` — this service is one of several across the platform whose list envelopes use
+        a slightly different cursor field name (a known, not-yet-normalized cross-service
+        inconsistency).
+      tags: [Events]
+      x-stack-visibility: authenticated
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: string, pattern: "^([1-9]|[1-9][0-9]|100)$" }
+          description: Page size, 1-100. Default 50.
+        - name: before
+          in: query
+          schema: { type: string, pattern: "^[0-9]{1,15}$" }
+          description: Event id cursor from a previous page's `nextBefore`.
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EventListResponse" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/UserNotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/auth/login:
+    post:
+      operationId: auth.login
+      summary: Log in with email and password
+      description: >-
+        Any valid API key may call this (no role gate — login is an end user's own action, not a
+        back-office mutation). On success, issues a new session and returns both tokens in the
+        body.
+      tags: [Authentication]
+      x-stack-visibility: authenticated
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LoginResponse" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401":
+          description: >-
+            UNAUTHORIZED (missing/invalid API key) or INVALID_CREDENTIALS (email or password is
+            incorrect — the same message and status whether the email is unknown or the password
+            is wrong, and the password hasher runs a dummy hash for an unknown email so response
+            time does not reveal which).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "403":
+          description: >-
+            ACCOUNT_DISABLED, or EMAIL_NOT_VERIFIED (only when `LOGIN_REQUIRES_VERIFIED_EMAIL=true`,
+            default `false`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "423":
+          description: >-
+            ACCOUNT_LOCKED — too many failed attempts (`LOGIN_MAX_FAILURES`, default 10). Carries
+            `retry-after` and `details.retryAfterSec`.
+          headers:
+            retry-after:
+              schema: { type: integer }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+              example: { error: { code: ACCOUNT_LOCKED, message: "too many failed attempts, try again later", details: { retryAfterSec: 900 } } }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/auth/refresh:
+    post:
+      operationId: auth.refresh
+      summary: Rotate a refresh token
+      description: >-
+        A refresh token that has already been rotated (replayed) revokes the whole session
+        (`TOKEN_REUSED`) — this is a reuse-detection signal, not a benign retry.
+      tags: [Authentication]
+      x-stack-visibility: authenticated
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RefreshRequest" }
+      responses:
+        "200":
+          description: OK — a new access/refresh token pair for the same session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LoginResponse" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401":
+          description: >-
+            UNAUTHORIZED (API key), INVALID_TOKEN (unknown, revoked, or expired refresh token), or
+            TOKEN_REUSED (an already-rotated token was replayed; the session is revoked as a
+            side effect).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "403":
+          description: ACCOUNT_DISABLED — the owning account was disabled since the session was created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+              example: { error: { code: ACCOUNT_DISABLED, message: "account is disabled" } }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/auth/logout:
+    post:
+      operationId: auth.logout
+      summary: Revoke the session owning a refresh token
+      description: Idempotent — an unknown or already-revoked refresh token still returns 204.
+      tags: [Authentication]
+      x-stack-visibility: authenticated
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RefreshRequest" }
+      responses:
+        "204": { description: Session revoked, or was already revoked/unknown. }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/auth/introspect:
+    post:
+      operationId: auth.introspect
+      summary: Validate an access token
+      description: >-
+        Never throws a domain error — an invalid, expired, or otherwise unusable token is reported
+        in the 200 body as `active: false`, not as an HTTP error status. See
+        `IntrospectResponse` for the exact, source-verified field combinations.
+      tags: [Authentication]
+      x-stack-visibility: authenticated
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/IntrospectRequest" }
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IntrospectResponse" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/auth/verify-email:
+    post:
+      operationId: auth.emailVerification.verify
+      summary: Consume an email-verification token
+      tags: [Email verification]
+      x-stack-visibility: authenticated
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TokenRequest" }
+      responses:
+        "200":
+          description: OK — the user, now verified.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserResponse" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/InvalidToken" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/auth/verify-email/resend:
+    post:
+      operationId: auth.emailVerification.resend
+      summary: Re-send the verification email
+      description: >-
+        Silent (still `202`) when the email is unknown, to avoid account enumeration. A known,
+        already-verified email returns `409 ALREADY_VERIFIED` instead — this is itself a (minor,
+        two-way) enumeration signal, confirmed and flagged in the Phase 0 audit, not fixed here.
+        A per-user cooldown (`RESEND_COOLDOWN_SEC`, default 60s) throttles repeat requests with
+        `429 TOO_MANY_REQUESTS`; a separate, unrelated self-throttle (`429 RATE_LIMITED`) can also
+        apply per API key.
+      tags: [Email verification]
+      x-stack-visibility: authenticated
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EmailOnlyRequest" }
+      responses:
+        "202":
+          description: >-
+            Accepted — either the mail was queued, or the email is unknown (both look identical to
+            the caller by design).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AcceptedResponse" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409":
+          description: ALREADY_VERIFIED — this email belongs to an already-verified account.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+              example: { error: { code: ALREADY_VERIFIED, message: "email is already verified" } }
+        "429": { $ref: "#/components/responses/ResendThrottled" }
+
+  /v1/auth/password/forgot:
+    post:
+      operationId: auth.password.forgot
+      summary: Request a password-reset email
+      description: >-
+        NOT unconditionally `202`: an unknown email or a disabled account resolves silently with
+        `202` (no enumeration signal), and a known active account normally also gets `202` — but a
+        request that arrives inside the per-user resend cooldown (`RESEND_COOLDOWN_SEC`, default
+        60s) gets `429 TOO_MANY_REQUESTS` instead, a real, source-confirmed exception to
+        "always 202" (flagged explicitly in the Phase 0 audit — do not assume unconditional 202
+        for this endpoint).
+      tags: [Password]
+      x-stack-visibility: authenticated
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EmailOnlyRequest" }
+      responses:
+        "202":
+          description: Accepted, or silently a no-op for an unknown/disabled account.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AcceptedResponse" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/ResendThrottled" }
+
+  /v1/auth/password/reset:
+    post:
+      operationId: auth.password.reset
+      summary: Reset a password with a reset token
+      description: >-
+        Revokes every session for the user and marks the email verified (proof of mailbox
+        control) as part of the same transaction.
+      tags: [Password]
+      x-stack-visibility: authenticated
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ResetPasswordRequest" }
+      responses:
+        "200":
+          description: OK — the user, with a new password.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserResponse" }
+        "400":
+          description: VALIDATION_FAILED (malformed body) or WEAK_PASSWORD (policy rejected).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "401": { $ref: "#/components/responses/InvalidToken" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/auth/password/change:
+    post:
+      operationId: auth.password.change
+      summary: Change the current password for the calling session
+      description: >-
+        Requires the end user's own access token in `X-Access-Token`, on top of the calling
+        backend's API key in `Authorization` — checked manually in the handler via `introspect()`,
+        not by Fastify's security machinery (there is no separate securityScheme for it).
+        Revokes every other active session for the user; the session identified by the presented
+        access token is kept.
+      tags: [Password]
+      x-stack-visibility: authenticated
+      parameters:
+        - $ref: "#/components/parameters/XAccessToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ChangePasswordRequest" }
+      responses:
+        "204": { description: Password changed. }
+        "400":
+          description: VALIDATION_FAILED (malformed body) or WEAK_PASSWORD (policy rejected).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "401":
+          description: >-
+            UNAUTHORIZED (missing/invalid API key), INVALID_TOKEN (`X-Access-Token` missing,
+            malformed, expired, or its session/account no longer active), or INVALID_CREDENTIALS
+            (`currentPassword` is wrong).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: http
+      scheme: bearer
+      description: >-
+        `Authorization: Bearer <API key>`. Keys are `id:secret[:role[:proxy]]`; `role` is
+        `read`/`write`/`readwrite` (missing role defaults to `readwrite`). Only
+        `POST /v1/users`, `PATCH /v1/users/{id}` and `DELETE /v1/users/{id}` require the `write`
+        role (or `readwrite`) — every other `/v1/*` route and `/metrics` accept any valid key
+        regardless of role; this sub-scoping is noted per-operation since a single Bearer scheme
+        cannot express it structurally.
+
+  parameters:
+    UserId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+      description: User id.
+    XAccessToken:
+      name: X-Access-Token
+      in: header
+      required: true
+      schema: { type: string }
+      description: >-
+        The end user's own JWT access token (not the API key). Checked manually by the handler via
+        `introspect()`; a missing or invalid value yields `401 INVALID_TOKEN`, not a schema-level
+        400.
+
+  responses:
+    Unauthorized:
+      description: UNAUTHORIZED — missing or invalid API key.
+      headers:
+        www-authenticate:
+          schema: { type: string, example: "Bearer" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example: { error: { code: UNAUTHORIZED, message: "missing or invalid API key" } }
+    Forbidden:
+      description: FORBIDDEN — the API key lacks the `write` role required for this operation.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example: { error: { code: FORBIDDEN, message: "this API key does not have \"write\" access" } }
+    ValidationFailed:
+      description: VALIDATION_FAILED — the request did not match its JSON Schema.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example: { error: { code: VALIDATION_FAILED, message: "body must have required property 'email'", details: [{ path: "", message: "must have required property 'email'", params: { missingProperty: "email" } }] } }
+    RateLimited:
+      description: >-
+        RATE_LIMITED — this API key's own request rate exceeded `RATE_LIMIT_MAX` (default 600) per
+        minute. Distinct from the domain `TOO_MANY_REQUESTS` cooldown on the email-resend
+        endpoints.
+      headers:
+        retry-after:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example: { error: { code: RATE_LIMITED, message: "rate limit exceeded, retry in 42 seconds" } }
+    ResendThrottled:
+      description: >-
+        TOO_MANY_REQUESTS — an email for this purpose was already sent within the resend cooldown
+        (`RESEND_COOLDOWN_SEC`, default 60s). Carries `retry-after` and `details.retryAfterSec`.
+      headers:
+        retry-after:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example: { error: { code: TOO_MANY_REQUESTS, message: "an email was sent recently, wait before requesting another", details: { retryAfterSec: 60 } } }
+    UserNotFound:
+      description: USER_NOT_FOUND — no user with this id.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example: { error: { code: USER_NOT_FOUND, message: "user not found" } }
+    InvalidToken:
+      description: >-
+        INVALID_TOKEN — the opaque token is invalid, expired, or already consumed. Exact wording
+        varies by endpoint (e.g. "verification link is invalid or expired", "reset link is invalid
+        or expired").
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  schemas:
+    Email:
+      type: string
+      format: email
+      maxLength: 254
+
+    ErrorEnvelope:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code: { type: string, description: "Stable machine-readable error code." }
+            message: { type: string }
+            details:
+              description: >-
+                Present only for some errors. An object for a single domain error's structured
+                detail (e.g. `{retryAfterSec}`, `{problems}`), or an array of `{path, message,
+                params}` for `VALIDATION_FAILED`. `INVALID_CURSOR` never has `details` (it is a
+                plain thrown object, not a domain `AuthError` instance).
+              oneOf:
+                - type: object
+                - type: array
+                  items: { type: object }
+
+    User:
+      type: object
+      additionalProperties: false
+      required: [id, email, name, status, emailVerified, emailVerifiedAt, lockedUntil, passwordChangedAt, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        name: { type: [string, "null"], maxLength: 120 }
+        status: { type: string, enum: [active, disabled] }
+        emailVerified: { type: boolean }
+        emailVerifiedAt: { type: [string, "null"], format: date-time }
+        lockedUntil:
+          type: [string, "null"]
+          format: date-time
+          description: Null once the lockout has expired, even if the row itself has not been cleared.
+        passwordChangedAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    Session:
+      type: object
+      additionalProperties: false
+      required: [id, createdAt, lastUsedAt, expiresAt, ip, userAgent]
+      properties:
+        id: { type: string, format: uuid }
+        createdAt: { type: string, format: date-time }
+        lastUsedAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        ip: { type: [string, "null"] }
+        userAgent: { type: [string, "null"] }
+
+    Event:
+      type: object
+      additionalProperties: false
+      required: [id, type, ip, meta, at]
+      properties:
+        id: { type: integer }
+        type: { type: string, description: "e.g. login.succeeded, login.failed, session.revoked, account.disabled, password.changed." }
+        ip: { type: [string, "null"] }
+        meta:
+          type: [object, "null"]
+          description: Parsed from the stored JSON; shape depends on `type`.
+        at: { type: string, format: date-time }
+
+    TokenView:
+      type: object
+      additionalProperties: false
+      required: [tokenType, accessToken, accessTokenExpiresAt, refreshToken, refreshTokenExpiresAt, sessionId]
+      properties:
+        tokenType: { type: string, const: Bearer }
+        accessToken: { type: string, description: "ES256 JWT." }
+        accessTokenExpiresAt: { type: string, format: date-time }
+        refreshToken: { type: string, description: "Opaque token." }
+        refreshTokenExpiresAt: { type: string, format: date-time }
+        sessionId: { type: string, format: uuid }
+
+    AccessClaims:
+      type: object
+      additionalProperties: false
+      required: [sub, sid, email, email_verified, jti, iat, exp, iss, aud]
+      properties:
+        sub: { type: string, format: uuid, description: "User id." }
+        sid: { type: string, format: uuid, description: "Session id." }
+        email: { type: string, format: email }
+        email_verified: { type: boolean }
+        jti: { type: string, format: uuid }
+        iat: { type: integer, description: "Epoch seconds." }
+        exp: { type: integer, description: "Epoch seconds." }
+        iss: { type: string, format: uri }
+        aud: { type: string }
+
+    UserCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email: { $ref: "#/components/schemas/Email" }
+        password: { type: string, minLength: 1, maxLength: 1024, description: "Also checked against the password policy (minimum length, denylist, not the account's own email, ...)." }
+        name: { type: [string, "null"], minLength: 1, maxLength: 120 }
+
+    UserPatchRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name: { type: [string, "null"], minLength: 1, maxLength: 120 }
+        status: { type: string, enum: [active, disabled] }
+
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email: { $ref: "#/components/schemas/Email" }
+        password: { type: string, minLength: 1, maxLength: 1024 }
+
+    RefreshRequest:
+      type: object
+      additionalProperties: false
+      required: [refreshToken]
+      properties:
+        refreshToken: { type: string, minLength: 1, maxLength: 128 }
+
+    IntrospectRequest:
+      type: object
+      additionalProperties: false
+      required: [accessToken]
+      properties:
+        accessToken: { type: string, minLength: 1, maxLength: 4096 }
+
+    TokenRequest:
+      type: object
+      additionalProperties: false
+      required: [token]
+      properties:
+        token: { type: string, minLength: 1, maxLength: 128 }
+
+    EmailOnlyRequest:
+      type: object
+      additionalProperties: false
+      required: [email]
+      properties:
+        email: { $ref: "#/components/schemas/Email" }
+
+    ResetPasswordRequest:
+      type: object
+      additionalProperties: false
+      required: [token, password]
+      properties:
+        token: { type: string, minLength: 1, maxLength: 128 }
+        password: { type: string, minLength: 1, maxLength: 1024 }
+
+    ChangePasswordRequest:
+      type: object
+      additionalProperties: false
+      required: [currentPassword, newPassword]
+      properties:
+        currentPassword: { type: string, minLength: 1, maxLength: 1024 }
+        newPassword: { type: string, minLength: 1, maxLength: 1024 }
+
+    CreateUserResponse:
+      type: object
+      additionalProperties: false
+      required: [user, verificationEmailSent]
+      properties:
+        user: { $ref: "#/components/schemas/User" }
+        verificationEmailSent:
+          type: boolean
+          description: False when the mail transport rejected the send; registration itself still succeeded.
+
+    UserResponse:
+      type: object
+      additionalProperties: false
+      required: [user]
+      properties:
+        user: { $ref: "#/components/schemas/User" }
+
+    LoginResponse:
+      type: object
+      additionalProperties: false
+      required: [user, tokens]
+      properties:
+        user: { $ref: "#/components/schemas/User" }
+        tokens: { $ref: "#/components/schemas/TokenView" }
+
+    RevokeAllResponse:
+      type: object
+      additionalProperties: false
+      required: [revoked]
+      properties:
+        revoked: { type: integer, minimum: 0, description: "Number of sessions revoked." }
+
+    AcceptedResponse:
+      type: object
+      additionalProperties: false
+      required: [accepted]
+      properties:
+        accepted: { type: boolean, const: true }
+
+    UserListResponse:
+      type: object
+      additionalProperties: false
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/User" }
+        nextCursor:
+          type: [string, "null"]
+          description: Opaque keyset cursor for the next page, or null when there is no next page.
+
+    SessionListResponse:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Session" }
+
+    EventListResponse:
+      type: object
+      additionalProperties: false
+      required: [items, nextBefore]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Event" }
+        nextBefore:
+          type: [string, "null"]
+          description: >-
+            Event-id cursor for the next (older) page, or null when there is no next page. Named
+            `nextBefore`, not `nextCursor` — this list endpoint's field name differs from
+            `/v1/users`'s, a known cross-service/cross-endpoint inconsistency, not a typo.
+
+    IntrospectResponse:
+      description: >-
+        Source-verified shape of `AuthService#introspect`, exposed as-is by the HTTP handler
+        (`{ active, ...(reason && {reason}), ...(claims && {claims}) }`). Exactly two forms occur:
+        `active: true` always carries `claims` and never `reason`; `active: false` always carries
+        `reason`, and additionally carries `claims` only for the two reasons where the JWT itself
+        verified but the session or account turned out not to be usable (`SESSION_REVOKED`,
+        `ACCOUNT_DISABLED`) — a JWT-level failure (`INVALID`, `EXPIRED`, `UNKNOWN_KEY`) never has
+        claims to attach.
+      oneOf:
+        - title: Active
+          type: object
+          additionalProperties: false
+          required: [active, claims]
+          properties:
+            active: { type: boolean, const: true }
+            claims: { $ref: "#/components/schemas/AccessClaims" }
+        - title: Inactive
+          type: object
+          additionalProperties: false
+          required: [active, reason]
+          properties:
+            active: { type: boolean, const: false }
+            reason:
+              type: string
+              enum: [INVALID, EXPIRED, UNKNOWN_KEY, SESSION_REVOKED, ACCOUNT_DISABLED]
+              description: >-
+                INVALID/EXPIRED/UNKNOWN_KEY: the JWT itself failed verification (bad signature,
+                expired, or signed with a key not in this service's JWKS) — `claims` absent.
+                SESSION_REVOKED/ACCOUNT_DISABLED: the JWT verified but its session or account is no
+                longer usable — `claims` present.
+            claims: { $ref: "#/components/schemas/AccessClaims" }
+
+    Jwk:
+      type: object
+      additionalProperties: false
+      required: [kty, crv, x, y, kid, alg, use]
+      properties:
+        kty: { type: string, const: EC }
+        crv: { type: string, const: P-256 }
+        x: { type: string }
+        y: { type: string }
+        kid: { type: string, description: "RFC 7638 JWK thumbprint." }
+        alg: { type: string, const: ES256 }
+        use: { type: string, const: sig }
+
+    JwksResponse:
+      type: object
+      additionalProperties: false
+      required: [keys]
+      properties:
+        keys:
+          type: array
+          items: { $ref: "#/components/schemas/Jwk" }
+          description: One entry normally; two during key rotation (current + previous).
+
+    HealthResponse:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: { type: string, const: ok }
+
+    ReadyResponse:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: { type: string, const: ok }
+
+    ReadyUnavailableResponse:
+      type: object
+      additionalProperties: false
+      required: [status, error]
+      properties:
+        status: { type: string, const: unavailable }
+        error: { type: string }
+
+    InfoResponse:
+      type: object
+      additionalProperties: false
+      required: [service, version, apiVersion, capabilities, schemaVersion, serviceCore]
+      properties:
+        service: { type: string, const: auth }
+        version: { type: string, description: "This service's own package.json semver." }
+        apiVersion: { type: string, const: v1 }
+        capabilities:
+          type: array
+          items: { type: string, enum: [jwks, email-verification, password-reset, refresh-tokens] }
+        schemaVersion: { type: integer, description: "SQLite PRAGMA user_version." }
+        serviceCore: { type: string, description: "Installed @atc-web/service-core version." }
