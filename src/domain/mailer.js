@@ -1,3 +1,5 @@
+import { RequestContext } from '@atc-web/service-core/request-context';
+
 /**
  * Outbound transactional mail contract. The auth service never renders email itself; it
  * hands template data to the notify service.
@@ -106,9 +108,15 @@ export class NotifyMailer extends Mailer {
    */
   async #request(method, path, body) {
     try {
+      // Post-production Phase 5: explicit, opt-in propagation — notify is a fixed, trusted
+      // internal platform dependency (never an operator-configured target), so this is the one
+      // call site in auth that's allowed to attach it. `RequestContext.get()` is `null` outside a
+      // real inbound request (a startup task, a test with no context set up); propagate nothing
+      // in that case rather than fabricate a trace for it.
+      const trace = RequestContext.get()?.propagationHeaders() ?? {};
       return await this.fetch(`${this.baseUrl}${path}`, {
         method,
-        headers: { authorization: `Bearer ${this.#apiKey}`, ...(body ? { 'content-type': 'application/json' } : {}) },
+        headers: { authorization: `Bearer ${this.#apiKey}`, ...(body ? { 'content-type': 'application/json' } : {}), ...trace },
         body: body ? JSON.stringify(body) : undefined,
         signal: AbortSignal.timeout(this.timeoutMs),
         redirect: 'error',

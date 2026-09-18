@@ -1,9 +1,8 @@
-import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { isIP } from 'node:net';
 import rateLimit from '@fastify/rate-limit';
 import Fastify from 'fastify';
-import { registerInfo, registerProbes } from '@atc-web/service-core/fastify';
+import { registerInfo, registerProbes, registerRequestContext, requestOptions } from '@atc-web/service-core/fastify';
 import { AuthError } from '../domain/errors.js';
 import { ApiKeyAuth } from './api-key-auth.js';
 import { Schemas } from './schemas.js';
@@ -70,14 +69,12 @@ export class AuthApi {
     const { config } = this;
     const app = Fastify({
       ...(config.tls ? { https: { cert: readFileSync(config.tls.certPath), key: readFileSync(config.tls.keyPath), minVersion: 'TLSv1.2' } } : {}),
-      loggerInstance: this.logger,
-      logger: this.logger ? undefined : { level: config.logLevel, redact: ['req.headers.authorization', 'req.headers["x-access-token"]'] },
+      ...requestOptions({ logger: this.logger, logLevel: config.logLevel, extraRedact: ['req.headers["x-access-token"]'] }),
       trustProxy: config.trustProxy,
       bodyLimit: config.bodyLimit,
-      requestIdHeader: 'x-request-id',
-      genReqId: () => randomUUID(),
       ajv: { customOptions: { removeAdditional: false, coerceTypes: false } },
     });
+    registerRequestContext(app, { trustProxy: config.trustProxy });
     app.decorateRequest('apiKeyId', '');
     app.decorateRequest('apiKeyRole', undefined);
     app.decorateRequest('apiKeyScopes', null);

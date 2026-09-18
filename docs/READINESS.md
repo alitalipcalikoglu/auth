@@ -103,7 +103,13 @@ service, reached only from the gateway, console, or another backend). Redacts `a
 ## Tracing
 
 Accepts an inbound `X-Request-Id` unconditionally and logs it on every line via Fastify's default
-request logging. Does not parse or forward `traceparent`. The audit events this service forwards do
+request logging. Also parses an inbound `traceparent` via `@atc-web/service-core`'s
+`registerRequestContext`, trust-gated on `TRUST_PROXY` (same boundary as `X-Forwarded-*`): trusted,
+the caller's trace-id is continued with a fresh span-id; untrusted or malformed, a fresh trace is
+started. Both `traceId`/`spanId` are logged on every request line. Its own call to `notify`
+(`src/domain/mailer.js`) explicitly propagates the active trace
+(`RequestContext#propagationHeaders()`); this is the one internal call site that does — see
+[OBSERVABILITY.md](../../stack/docs/OBSERVABILITY.md). The audit events this service forwards do
 **not** carry a request id — `EventStore`'s per-user security-event schema has no such column today
 (`src/store/event-store.js`), so correlating a forwarded audit event back to the specific inbound
 HTTP request that caused it is not yet possible; only auth's own log line for that request carries

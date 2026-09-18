@@ -154,9 +154,13 @@ file is not the supported or tested deployment model.
 ## Observability
 
 Accepts an inbound `X-Request-Id` unconditionally and logs it via Fastify's default request
-logging. Does not parse or forward `traceparent`. The security events this service forwards to
+logging. Also parses an inbound `traceparent`, trusted only when `TRUST_PROXY=true` — the caller's
+trace-id is continued with a fresh span-id for this hop, both logged as `traceId`/`spanId` via
+`@atc-web/service-core`'s `registerRequestContext`. Its own call to `notify`
+(`src/domain/mailer.js`) explicitly propagates the active trace (`RequestContext#propagationHeaders()`);
+no other outbound call does. The security events this service forwards to
 audit do not yet carry a request id of their own — only auth's own log line for the causing request
-does.
+does. See [OBSERVABILITY.md](../stack/docs/OBSERVABILITY.md).
 
 ## Backup / restore
 
