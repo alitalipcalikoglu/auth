@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { after, before, test } from 'node:test';
 import { AuthApi } from '../src/http/auth-api.js';
 import { API_KEY, ctx, GOOD_PASSWORD, OTHER_KEY, READ_KEY, silentLog, testAuthService } from './helpers.js';
@@ -35,6 +36,9 @@ test('GET /v1/info reports service identity and capabilities', async () => {
 test('public endpoints: health, ready, jwks; everything else needs an API key', async () => {
   assert.equal((await app.inject('/health')).statusCode, 200);
   assert.equal((await app.inject('/ready')).statusCode, 200);
+  const spec = await app.inject('/openapi.yaml');
+  assert.equal(spec.body, readFileSync(new URL('../openapi.yaml', import.meta.url), 'utf8'));
+  assert.match(String(spec.headers['content-type']), /^text\/yaml/);
   const jwks = await app.inject('/.well-known/jwks.json');
   assert.equal(jwks.statusCode, 200);
   assert.equal(jwks.json().keys[0].kid, t.signer.kid);

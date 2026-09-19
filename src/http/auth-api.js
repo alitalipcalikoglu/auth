@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { isIP } from 'node:net';
 import rateLimit from '@fastify/rate-limit';
 import Fastify from 'fastify';
-import { registerInfo, registerProbes, registerRequestContext, requestOptions } from '@atc-web/service-core/fastify';
+import { registerInfo, registerOpenApi, registerProbes, registerRequestContext, requestOptions } from '@atc-web/service-core/fastify';
 import { AuthError } from '../domain/errors.js';
 import { ApiKeyAuth } from './api-key-auth.js';
 import { Schemas } from './schemas.js';
@@ -133,6 +133,7 @@ export class AuthApi {
       this.db.ping();
       await this.mailer.verify();
     }, { cacheMs: AuthApi.READY_CACHE_MS });
+    registerOpenApi(app, new URL('../../openapi.yaml', import.meta.url));
     registerInfo(app, {
       service: 'auth',
       version: this.version,
