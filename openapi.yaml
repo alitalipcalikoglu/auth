@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: auth
-  version: "1.0.0"
+  version: "1.1.0"
   description: >-
     User accounts, sessions and JWT-based authentication for the atc-web platform. Callers are
     trusted application backends holding an API key (never an end user's browser directly); they
