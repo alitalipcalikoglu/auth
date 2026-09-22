@@ -1,6 +1,6 @@
 {
   "name": "@atc-web/auth",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "private": true,
   "description": "Authentication service: users, passwords, JWT access tokens, rotating refresh tokens, email verification and password reset over HTTP",
   "license": "MIT",
