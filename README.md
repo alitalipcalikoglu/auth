@@ -69,13 +69,13 @@ Errors are JSON: `{ "error": { "code", "message", "details?" } }`. `423` and `42
 | POST | `/v1/auth/logout` | `{ refreshToken }` → `204`. Idempotent. |
 | POST | `/v1/auth/introspect` | `{ accessToken }` → `{ active, claims?, reason? }`. |
 | POST | `/v1/auth/verify-email` | `{ token }` → `{ user }`. |
-| POST | `/v1/auth/verify-email/resend` | `{ email }` → `202`. Silent for unknown emails, throttled per user. |
-| POST | `/v1/auth/password/forgot` | `{ email }` → `202`. Always accepted. |
+| POST | `/v1/auth/verify-email/resend` | `{ email }` → `202`. Silent for unknown or verified emails and inside the per-user cooldown. |
+| POST | `/v1/auth/password/forgot` | `{ email }` → `202`. Always accepted; silent for unknown, disabled or throttled accounts. |
 | POST | `/v1/auth/password/reset` | `{ token, password }` → `{ user }`. Revokes all sessions, marks email verified. |
 | POST | `/v1/auth/password/change` | Header `X-Access-Token: <jwt>`, body `{ currentPassword, newPassword }` → `204`. Keeps the current session, revokes the others. |
 | GET | `/metrics` | Prometheus text: users by status, active sessions, uptime. API key required. |
 
-Error codes: `EMAIL_TAKEN`, `WEAK_PASSWORD`, `INVALID_CREDENTIALS`, `ACCOUNT_LOCKED`, `ACCOUNT_DISABLED`, `EMAIL_NOT_VERIFIED`, `INVALID_TOKEN`, `TOKEN_REUSED`, `USER_NOT_FOUND`, `SESSION_NOT_FOUND`, `ALREADY_VERIFIED`, `TOO_MANY_REQUESTS`, `RATE_LIMITED`, `VALIDATION_FAILED`, `UNAUTHORIZED`.
+Error codes: `EMAIL_TAKEN`, `WEAK_PASSWORD`, `INVALID_CREDENTIALS`, `ACCOUNT_LOCKED`, `ACCOUNT_DISABLED`, `EMAIL_NOT_VERIFIED`, `INVALID_TOKEN`, `TOKEN_REUSED`, `USER_NOT_FOUND`, `SESSION_NOT_FOUND`, `RATE_LIMITED`, `VALIDATION_FAILED`, `UNAUTHORIZED`.
 
 ### Typical flow from your backend
 
@@ -112,7 +112,7 @@ Key rotation: run `npm run keygen -- keys/jwt-2027`, point `JWT_PRIVATE_KEY_PATH
 - Tokens: only SHA-256 hashes of refresh, verification and reset tokens are stored. Reset validates the new password before spending the link. Reset revokes all sessions; password change revokes all other sessions.
 - API keys compared in constant time; per-key rate limit; request bodies capped at `BODY_LIMIT`; unknown fields rejected; `Cache-Control: no-store` on every response except JWKS.
 - **Upgrading to a role-aware `AUTH_API_KEYS`:** a key already deployed without a role keeps full `readwrite` access — no `write` route starts rejecting it. It does *not* keep `X-Client-IP` trust automatically, though: that requires the explicit `proxy` flag (`id:secret:readwrite:proxy`). If your backend forwarded the end user's real address and you relied on it appearing in the audit log, add `proxy` to that key when you upgrade — otherwise every session/event records the socket's own peer address (your backend's, not the end user's) instead.
-- Enumeration resistance: `forgot` and `resend` return `202` whether or not the email exists.
+- Enumeration resistance: `forgot` and `resend` always return `202`. Unknown, verified, disabled and throttled cases are silent no-ops, so neither status nor error code reveals whether an account exists.
 - Audit log: registration, verification, login success/failure with reason, lockout, refresh, reuse detection, logout, password events, session and account changes. Retained `EVENT_RETENTION_DAYS`.
 - Container runs as the unprivileged `node` user; keys mounted read-only.
 

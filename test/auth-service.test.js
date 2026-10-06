@@ -37,7 +37,9 @@ test('register → verify email → login issues a token pair and audit events',
   const verified = t.service.verifyEmail(t.mailer.lastToken('verify'), ctx);
   assert.ok(verified.email_verified_at);
   throwsWith(() => t.service.verifyEmail(t.mailer.lastToken('verify'), ctx), 'INVALID_TOKEN');
-  await rejectsWith(t.service.resendVerification('ali@example.com', ctx), 'ALREADY_VERIFIED');
+  const before = t.mailer.sent.length;
+  await t.service.resendVerification('ali@example.com', ctx); // silent: already verified
+  assert.equal(t.mailer.sent.length, before, 'no mail for an already-verified address');
   await t.service.resendVerification('nobody@example.com', ctx); // silent
 
   const { tokens, user: loggedIn } = await t.service.login({ email: 'ALI@example.com', password: GOOD_PASSWORD }, ctx);
@@ -61,7 +63,8 @@ test('registration succeeds when the mailer fails and resend is throttled', asyn
   const { verificationEmailSent } = await t.service.register({ email: 'a@example.com', password: GOOD_PASSWORD }, ctx);
   assert.equal(verificationEmailSent, false);
   t.mailer.fail = null;
-  await rejectsWith(t.service.resendVerification('a@example.com', ctx), 'TOO_MANY_REQUESTS');
+  await t.service.resendVerification('a@example.com', ctx); // silent: inside the cooldown
+  assert.equal(t.mailer.sent.length, 0, 'throttled resend sends nothing');
   t.clock.now += 61_000;
   await t.service.resendVerification('a@example.com', ctx);
   assert.equal(t.mailer.sent.length, 1);
@@ -162,4 +165,13 @@ test('forgot/reset password revokes sessions and verifies the mailbox; change pa
   assert.equal(t.service.revokeAllSessions(user.id, ctx), 1);
   t.service.deleteUser(user.id, ctx);
   throwsWith(() => t.service.listSessions(user.id), 'USER_NOT_FOUND');
+});
+
+test('forgot-password inside the cooldown is a silent no-op, not an error', async () => {
+  const t = await testAuthService({ RESEND_COOLDOWN_SEC: '60' });
+  await t.service.register({ email: 'f@example.com', password: GOOD_PASSWORD }, ctx);
+  const before = t.mailer.sent.length;
+  await t.service.forgotPassword('f@example.com', ctx);
+  await t.service.forgotPassword('f@example.com', ctx); // silent: inside the cooldown
+  assert.equal(t.mailer.sent.length, before + 1, 'only the first request sends a mail');
 });

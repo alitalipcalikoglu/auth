@@ -15,8 +15,6 @@ export class AuthError extends Error {
     TOKEN_REUSED: 401,
     USER_NOT_FOUND: 404,
     SESSION_NOT_FOUND: 404,
-    ALREADY_VERIFIED: 409,
-    TOO_MANY_REQUESTS: 429,
   };
 
   /**

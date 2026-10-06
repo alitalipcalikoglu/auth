@@ -122,8 +122,8 @@ export class AuthService {
   }
 
   /**
-   * Re-send the verification mail. Silent when the email is unknown (no enumeration) and
-   * throttled per user.
+   * Re-send the verification mail. Silent when the email is unknown, already verified, or inside
+   * the per-user cooldown, so the response never reveals whether an account exists.
    * @param {string} email
    * @param {Ctx} ctx
    * @returns {Promise<void>}
@@ -131,8 +131,7 @@ export class AuthService {
   async resendVerification(email, ctx) {
     const user = this.users.byEmail(email);
     if (!user) return;
-    if (user.email_verified_at) throw new AuthError('ALREADY_VERIFIED', 'email is already verified');
-    this.#assertResendAllowed(user.id, 'verify_email');
+    if (user.email_verified_at || this.#resendThrottled(user.id, 'verify_email')) return;
     this.events.record({ userId: user.id, type: 'email.verification_resent', ip: ctx.ip }, this.now());
     await this.#sendVerification(user);
   }
@@ -310,8 +309,7 @@ export class AuthService {
    */
   async forgotPassword(email, ctx) {
     const user = this.users.byEmail(email);
-    if (!user || user.status === 'disabled') return;
-    this.#assertResendAllowed(user.id, 'reset_password');
+    if (!user || user.status === 'disabled' || this.#resendThrottled(user.id, 'reset_password')) return;
     const now = this.now();
     const token = this.db.transaction(() => {
       const t = this.tokens.issue({ userId: user.id, purpose: 'reset_password', ttlMs: this.options.resetTtlMs }, now);
@@ -443,11 +441,9 @@ export class AuthService {
    * @param {string} userId
    * @param {import('../types.js').TokenPurpose} purpose
    */
-  #assertResendAllowed(userId, purpose) {
-    if (this.options.resendCooldownMs <= 0) return;
-    if (this.tokens.issuedSince(userId, purpose, this.now() - this.options.resendCooldownMs) > 0) {
-      throw new AuthError('TOO_MANY_REQUESTS', 'an email was sent recently, wait before requesting another', { retryAfterSec: Math.ceil(this.options.resendCooldownMs / 1000) });
-    }
+  #resendThrottled(userId, purpose) {
+    if (this.options.resendCooldownMs <= 0) return false;
+    return this.tokens.issuedSince(userId, purpose, this.now() - this.options.resendCooldownMs) > 0;
   }
 
   /**

@@ -37,12 +37,7 @@ authcurl -X POST $AUTH/v1/auth/verify-email -d '{ "token": "Qm5…" }'
 authcurl -X POST $AUTH/v1/auth/verify-email/resend -d '{ "email": "ali@example.com" }'
 ```
 
-`202 {"accepted":true}` whether or not the address exists (no account enumeration). Issuing a new link invalidates the previous one. Errors you can get:
-
-| Status | Code | When |
-|---|---|---|
-| 409 | `ALREADY_VERIFIED` | Nothing to do |
-| 429 | `TOO_MANY_REQUESTS` | A link was sent within `RESEND_COOLDOWN_SEC` (default 60). `Retry-After` set. |
+Always `202 {"accepted":true}`: for unknown addresses, already-verified addresses and repeats within `RESEND_COOLDOWN_SEC` (default 60) nothing is sent, but the response is identical, so it cannot be used to discover accounts. Issuing a new link invalidates the previous one.
 
 ## Errors on registration
 

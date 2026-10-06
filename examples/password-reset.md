@@ -8,7 +8,7 @@ authcurl -X POST $AUTH/v1/auth/password/forgot -d '{ "email": "ali@example.com" 
 
 Always `202 {"accepted":true}`, even for unknown or disabled accounts, so the endpoint cannot be used to discover users. If the account exists, notify sends the `password-reset` template with `RESET_URL_TEMPLATE` filled in and the requester's IP (from `X-Client-IP`) shown in the mail.
 
-Throttled per user by `RESEND_COOLDOWN_SEC`; a second request inside the window answers `429 TOO_MANY_REQUESTS`.
+Throttled per user by `RESEND_COOLDOWN_SEC`; a second request inside the window still answers `202` but sends nothing.
 
 ## 2. Reset
 
