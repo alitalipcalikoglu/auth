@@ -199,11 +199,11 @@ export class AuthApi {
       items: s.listSessions(/** @type {{ id: string }} */ (request.params).id).map(Views.session),
     }));
 
-    api.delete('/users/:id/sessions', { schema: { params: Schemas.idParams } }, async (request) => ({
+    api.delete('/users/:id/sessions', { schema: { params: Schemas.idParams }, preHandler: ApiKeyAuth.require('write') }, async (request) => ({
       revoked: s.revokeAllSessions(/** @type {{ id: string }} */ (request.params).id, ctx(request)),
     }));
 
-    api.delete('/users/:id/sessions/:sid', { schema: { params: Schemas.idSidParams } }, async (request, reply) => {
+    api.delete('/users/:id/sessions/:sid', { schema: { params: Schemas.idSidParams }, preHandler: ApiKeyAuth.require('write') }, async (request, reply) => {
       const { id, sid } = /** @type {{ id: string, sid: string }} */ (request.params);
       s.revokeSession(id, sid, ctx(request));
       return reply.code(204).send();

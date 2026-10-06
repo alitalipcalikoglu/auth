@@ -219,6 +219,10 @@ test('Stage 4: a read-only key cannot register, update or delete a user, but can
   assert.equal(res.statusCode, 403);
   res = await app.inject({ method: 'DELETE', url: `/v1/users/${user.id}`, headers: readAuth });
   assert.equal(res.statusCode, 403);
+  res = await app.inject({ method: 'DELETE', url: `/v1/users/${user.id}/sessions`, headers: readAuth });
+  assert.equal(res.statusCode, 403, 'a read-only key cannot revoke every session');
+  res = await app.inject({ method: 'DELETE', url: `/v1/users/${user.id}/sessions/00000000-0000-4000-8000-000000000000`, headers: readAuth });
+  assert.equal(res.statusCode, 403, 'a read-only key cannot revoke a session');
 
   res = await app.inject({ method: 'GET', url: `/v1/users/${user.id}`, headers: readAuth });
   assert.equal(res.statusCode, 200, 'reading is still allowed');

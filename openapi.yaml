@@ -294,7 +294,7 @@ paths:
       description: >-
         Returns the count revoked. Note this endpoint returns `200` with a body, **not** `204` —
         unlike the single-session revoke below, the handler sends a JSON object (confirmed in
-        source: no `reply.code(204)` on this route).
+        source: no `reply.code(204)` on this route). Requires an API key with the `write` role.
       tags: [Sessions]
       x-stack-visibility: authenticated
       responses:
@@ -305,6 +305,7 @@ paths:
               schema: { $ref: "#/components/schemas/RevokeAllResponse" }
         "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/UserNotFound" }
         "429": { $ref: "#/components/responses/RateLimited" }
 
@@ -322,13 +323,14 @@ paths:
       description: >-
         Idempotent create-then-delete semantics aside, a session that does not exist or does not
         belong to `id` returns `SESSION_NOT_FOUND` — this route does not separately check whether
-        `id` itself refers to a real user first.
+        `id` itself refers to a real user first. Requires an API key with the `write` role.
       tags: [Sessions]
       x-stack-visibility: authenticated
       responses:
         "204": { description: Session revoked (or already revoked). }
         "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "404":
           description: SESSION_NOT_FOUND — no such session for this user.
           content:
